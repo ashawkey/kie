@@ -3,6 +3,24 @@
 export const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 export const lerp = (a, b, t) => a + (b - a) * t;
 
+export const MAX_EDITOR_DIMENSION = 8192;
+export const MAX_EDITOR_PIXELS = MAX_EDITOR_DIMENSION * MAX_EDITOR_DIMENSION;
+const MAX_CANVAS_DIMENSION = 32767;
+
+/** Validate dimensions before assigning them to an HTML canvas. */
+export function validateCanvasDimensions(w, h, maxDimension = MAX_CANVAS_DIMENSION) {
+  if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) ||
+      w < 1 || h < 1 || w > maxDimension || h > maxDimension ||
+      w * h > MAX_EDITOR_PIXELS) {
+    throw new RangeError('Invalid or oversized canvas dimensions');
+  }
+  return { width: w, height: h };
+}
+
+export function validateEditorDimensions(w, h) {
+  return validateCanvasDimensions(w, h, MAX_EDITOR_DIMENSION);
+}
+
 export function el(tag, attrs = {}, children = []) {
   const n = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -25,9 +43,10 @@ export const $ = (sel, root = document) => root.querySelector(sel);
 export const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
 export function makeCanvas(w, h) {
+  const { width, height } = validateCanvasDimensions(w, h);
   const c = document.createElement('canvas');
-  c.width = Math.max(1, w | 0);
-  c.height = Math.max(1, h | 0);
+  c.width = width;
+  c.height = height;
   return c;
 }
 

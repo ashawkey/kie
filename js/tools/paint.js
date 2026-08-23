@@ -24,11 +24,14 @@ class StrokeTool extends PixelTool {
   }
 
   onDown(e) {
-    const p = this.beginEdit({ keepOriginal: true });
+    const pixelPerfect = !!this.opts.pixelPerfect && (this.opts.size ?? 1) === 1;
+    const p = this.beginEdit({
+      needsOriginal: pixelPerfect,
+      configure: (painter) => this.configure(painter),
+    });
     if (!p) return;
-    this.configure(p);
     if (e.button === 2 && p.mode === 'paint') p.color = this.app.color.secondary;
-    this.pp = this.opts.pixelPerfect && (this.opts.size ?? 1) === 1 ? new PixelPerfect() : null;
+    this.pp = pixelPerfect ? new PixelPerfect() : null;
     this.last = { x: e.ix, y: e.iy };
     this.shiftAnchor = { x: e.ix, y: e.iy };
     this.paintPoint(e.ix, e.iy);
@@ -112,13 +115,16 @@ export class EraserTool extends StrokeTool {
 /** Line / rectangle / ellipse with live preview. */
 class ShapeTool extends PixelTool {
   onDown(e) {
-    const p = this.beginEdit();
-    if (!p) return;
     const o = this.opts;
-    p.size = o.size ?? 1;
-    p.shape = 'square';
-    p.opacity = (o.opacity ?? 100) / 100;
-    p.color = e.button === 2 ? this.app.color.secondary : this.app.color.primary;
+    const p = this.beginEdit({
+      configure: (painter) => {
+        painter.size = o.size ?? 1;
+        painter.shape = 'square';
+        painter.opacity = (o.opacity ?? 100) / 100;
+        painter.color = e.button === 2 ? this.app.color.secondary : this.app.color.primary;
+      },
+    });
+    if (!p) return;
     this.start = { x: e.ix, y: e.iy };
     this.end = { x: e.ix, y: e.iy };
     this.render();
@@ -141,6 +147,7 @@ class ShapeTool extends PixelTool {
 
   render() {
     this.resetPreview();
+    if (!this.painter) return;
     this.paintShape(this.painter, this.start, this.end);
     this.layer.ctx.putImageData(this.painter.image, 0, 0);
     this.app.doc.touch();
@@ -245,6 +252,7 @@ export class GradientTool extends PixelTool {
     }
     this.end = { x, y };
     this.resetPreview();
+    if (!this.painter) return;
     this.paint();
     this.layer.ctx.putImageData(this.painter.image, 0, 0);
     this.app.doc.touch();

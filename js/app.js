@@ -7,7 +7,7 @@ import { View } from './core/view.js';
 import { Renderer } from './core/renderer.js';
 import { $, el } from './core/util.js';
 import { ToolManager, SIZED_TOOLS } from './tools/index.js';
-import { cancelSession, commitSession } from './tools/transform.js';
+import { cancelSession, commitSession, stageSession } from './tools/transform.js';
 import { ColorState, buildColorPanel } from './ui/color.js';
 import { buildLayersPanel } from './ui/layers.js';
 import { buildToolRail, buildOptionsBar, buildHistoryPanel } from './ui/toolbar.js';
@@ -18,7 +18,7 @@ import { installPointer } from './ui/pointer.js';
 import { icon } from './ui/icons.js';
 import { installNavigator } from './ui/navigator.js';
 import { installTooltips } from './ui/tooltip.js';
-import { toast } from './ui/modal.js';
+import { confirmDialog, toast } from './ui/modal.js';
 import { openImageAsDocument } from './ops/io.js';
 import { t, initLocale, setLocale, locale, LOCALES } from './core/i18n.js';
 
@@ -40,42 +40,195 @@ class App {
     // File the document is linked to, so Save can write back in place.
     this.fileHandle = null;
     this.exportSettings = { format: 'png', scale: 1, quality: 0.92 };
-    this.savedAt = 0; // history depth at the last save
+    this.savedStateId = this.history.stateId;
+    this.documentEpoch = 0;
+    this.replacementInvocation = 0;
+    this.clipboardInvocation = 0;
+    this.pendingEdit = null;
     this.commands = registerCommands(this);
   }
 
   /** True when there are edits that have not been written to a file. */
   get isDirty() {
-    return this.history.past.length !== this.savedAt;
+    return !!this.floating || !!this.pendingEdit || this.history.stateId !== this.savedStateId;
   }
 
-  markSaved() {
-    this.savedAt = this.history.past.length;
+  markSaved(stateId = this.history.stateId, doc = this.doc, documentEpoch = this.documentEpoch) {
+    if (this.doc !== doc || this.documentEpoch !== documentEpoch) return false;
+    this.savedStateId = stateId;
     bus.emit('doc');
+    return true;
   }
 
   /** Associate the document with a file handle chosen by the user. */
-  linkFile(handle, name) {
+  linkFile(handle, name, stateId = this.history.stateId, doc = this.doc,
+    documentEpoch = this.documentEpoch) {
+    if (this.doc !== doc || this.documentEpoch !== documentEpoch) return false;
     this.fileHandle = handle || null;
     if (name) this.docName = name;
-    this.markSaved();
+    this.markSaved(stateId, doc, documentEpoch);
+    return true;
+  }
+
+  /* ---------- pending edits ---------- */
+
+  beginPendingEdit(edit) {
+    if (!edit) return false;
+    if (this.pendingEdit === edit) return true;
+    this.prepareMutation();
+    this.pendingEdit = edit;
+    bus.emit('tool-edit');
+    return true;
+  }
+
+  endPendingEdit(edit) {
+    if (this.pendingEdit !== edit) return false;
+    this.pendingEdit = null;
+    bus.emit('tool-edit');
+    return true;
+  }
+
+  settlePendingEdit(action = 'commit', edit = this.pendingEdit) {
+    if (!edit || this.pendingEdit !== edit) return false;
+    // Keep ownership during settlement so the edit can distinguish this path
+    // from a genuinely stale pointer completion. Always detach afterwards.
+    const fn = action === 'cancel' ? edit.cancelPendingEdit : edit.commitPendingEdit;
+    fn?.call(edit);
+    if (this.pendingEdit === edit) {
+      this.pendingEdit = null;
+      bus.emit('tool-edit');
+    }
+    return true;
+  }
+
+  /** Settle previews before any operation that mutates or snapshots the doc. */
+  prepareMutation() {
+    this.settlePendingEdit('commit');
+    if (this.floating) commitSession(this, 'Transform');
+  }
+
+  /**
+   * Preflight settlement without changing pending ownership or live pixels.
+   * Call commitPreparedMutation only after the caller's own detached work has
+   * also completed, so a failure cannot accidentally commit another edit.
+   */
+  stageMutation() {
+    let pending = null;
+    if (this.pendingEdit) {
+      const edit = this.pendingEdit;
+      if (typeof edit.stagePendingEdit !== 'function') return null;
+      const staged = edit.stagePendingEdit();
+      if (!staged) return null;
+      pending = { edit, staged };
+    }
+    let floating = null;
+    if (this.floating) {
+      floating = stageSession(this, this.floating);
+      if (!floating) return null;
+    }
+    return { pending, floating };
+  }
+
+  commitPreparedMutation(prepared) {
+    if (!prepared) return false;
+    if (prepared.pending) {
+      const { edit, staged } = prepared.pending;
+      if (this.pendingEdit !== edit || edit.commitStagedPendingEdit(staged) === false) return false;
+    }
+    if (prepared.floating) {
+      if (this.floating !== prepared.floating.session ||
+          !commitSession(this, 'Transform', prepared.floating)) return false;
+    }
+    return true;
+  }
+
+  mutationToken() {
+    return {
+      doc: this.doc,
+      documentEpoch: this.documentEpoch,
+      revision: this.history.revision,
+      stateId: this.history.stateId,
+    };
+  }
+
+  isDocumentTokenCurrent(token) {
+    return !!token && this.doc === token.doc && this.documentEpoch === token.documentEpoch;
+  }
+
+  isMutationTokenCurrent(token) {
+    return this.isDocumentTokenCurrent(token) && this.history.revision === token.revision;
+  }
+
+  prepareAsyncMutation() {
+    this.prepareMutation();
+    return this.mutationToken();
+  }
+
+  /** Start an explicit document-replacement workflow in invocation order. */
+  beginReplacement() {
+    const token = this.prepareAsyncMutation();
+    token.replacementInvocation = ++this.replacementInvocation;
+    return token;
+  }
+
+  isReplacementTokenCurrent(token) {
+    return this.isMutationTokenCurrent(token) &&
+      token.replacementInvocation === this.replacementInvocation;
+  }
+
+  /** Start a paste workflow; only the latest invocation may settle or mutate. */
+  beginClipboardInvocation() {
+    const token = this.prepareAsyncMutation();
+    token.clipboardInvocation = ++this.clipboardInvocation;
+    return token;
+  }
+
+  isClipboardTokenCurrent(token) {
+    return this.isMutationTokenCurrent(token) &&
+      token.clipboardInvocation === this.clipboardInvocation;
   }
 
   /* ---------- document ---------- */
 
-  setDoc(doc, name, handle = null) {
-    this.cancelFloating();
+  async setDoc(doc, name, handle = null, expected = this.beginReplacement()) {
+    // Callers that decoded or picked asynchronously carry the token they made
+    // before that work. Direct callers get a token at setDoc invocation.
+    if (!this.isReplacementTokenCurrent(expected)) return false;
+    if (this.isDirty) {
+      const discard = await confirmDialog(
+        t('Discard unsaved changes?'),
+        t('This will replace the current image and cannot be undone.'),
+        t('Discard'),
+      );
+      if (!discard || !this.isReplacementTokenCurrent(expected)) return false;
+    }
+    // Revalidate immediately before all replacement side effects. In
+    // particular, an edit or newer replacement request made while confirmation
+    // was open invalidates this workflow.
+    if (!this.isReplacementTokenCurrent(expected)) return false;
+    if (!this.isReplacementTokenCurrent(expected)) return false;
     this.doc = doc;
+    this.documentEpoch++;
     this.docName = name || 'untitled';
     this.fileHandle = handle;
     this.selection = new Selection(doc.width, doc.height);
     this.history.clear();
-    this.savedAt = 0;
+    this.savedStateId = this.history.stateId;
+    // The old interaction is intentionally abandoned after the replacement
+    // wins; resetting it against the new document must not restore old pixels.
+    this.pendingEdit = null;
+    this.floating = null;
+    // The replacement has now won. Clear gesture geometry without changing
+    // the selected tool or its persistent options, and invalidate routed
+    // pointer state before publishing the new document.
+    this.tools.resetInteractions();
+    bus.emit('document-replaced', this.documentEpoch);
     bus.emit('doc');
     bus.emit('layers');
     bus.emit('selection');
     this.view.fit(doc.width, doc.height);
     this.updateTitle();
+    return true;
   }
 
   updateTitle() {
@@ -84,26 +237,62 @@ class App {
       `${this.isDirty ? '• ' : ''}${name} · ${this.doc.width}×${this.doc.height}`;
   }
 
-  async openFile(file, handle = null) {
-    if (file.name.endsWith('.glassx')) {
-      const { loadProject } = await import('./ops/io.js');
-      await loadProject(this, file);
-    } else {
-      await openImageAsDocument(this, file, handle);
+  async openFile(file, handle = null, token = this.beginReplacement()) {
+    if (!this.isReplacementTokenCurrent(token)) return false;
+    if (file.name.toLowerCase().endsWith('.glassx')) {
+      try {
+        const { loadProject } = await import('./ops/io.js');
+        if (this.isReplacementTokenCurrent(token)) return await loadProject(this, file, token);
+      } catch (e) {
+        if (this.isReplacementTokenCurrent(token)) this.toast('Could not open project');
+      }
+      return false;
+    }
+    try {
+      return await openImageAsDocument(this, file, handle, token);
+    } catch {
+      // Decode, dimension, and canvas failures are contained at the shared
+      // boundary used by pickers, drag/drop, and direct file opens.
+      if (this.isReplacementTokenCurrent(token)) this.toast('Could not open image');
+      return false;
     }
   }
 
   /* ---------- commands ---------- */
 
+  commandEnabled(id) {
+    const cmd = this.commands.get(id);
+    if (!cmd) return false;
+    if ((id === 'edit.undo' || id === 'edit.redo') &&
+        (this.pendingEdit || this.floating)) return true;
+    return !cmd.enabled || cmd.enabled(this);
+  }
+
+  settleHistoryNavigation() {
+    const settled = this.settlePendingEdit('cancel');
+    const hadFloating = !!this.floating;
+    this.cancelFloating();
+    return settled || hadFloating;
+  }
+
   run(id) {
     const cmd = this.commands.get(id);
-    if (!cmd) return;
-    if (cmd.enabled && !cmd.enabled(this)) return;
-    // A pending transform must be baked before most operations.
-    if (this.floating && !['edit.undo', 'edit.redo', 'edit.transform'].includes(id)) {
-      commitSession(this, 'Transform');
+    // Never settle a transaction for an unavailable/unrelated command.
+    if (!cmd || !this.commandEnabled(id)) return false;
+    const undoRedo = id === 'edit.undo' || id === 'edit.redo';
+    if (undoRedo) {
+      // Cancelling a preview is itself the requested navigation; do not also
+      // traverse an older history entry in the same user action.
+      if (this.settleHistoryNavigation()) return true;
+      if (cmd.enabled && !cmd.enabled(this)) return false;
+    } else {
+      this.settlePendingEdit('commit');
+      if (cmd.enabled && !cmd.enabled(this)) return false;
+      // A pending transform must be baked before most operations.
+      if (this.floating && id !== 'edit.transform') commitSession(this, 'Transform');
     }
     cmd.run(this);
+    return true;
   }
 
   cancelFloating() {
@@ -197,11 +386,13 @@ function boot() {
   $('#zoom-value').addEventListener('click', () => app.view.setScale(1));
 
   const syncButtons = () => {
-    $('#btn-undo').disabled = !app.history.canUndo();
-    $('#btn-redo').disabled = !app.history.canRedo();
+    $('#btn-undo').disabled = !app.commandEnabled('edit.undo');
+    $('#btn-redo').disabled = !app.commandEnabled('edit.redo');
     app.updateTitle();
   };
   bus.on('history', syncButtons);
+  bus.on('tool-edit', syncButtons);
+  bus.on('layers', syncButtons);
   syncButtons();
 
   for (const ev of ['view', 'selection', 'doc', 'tool']) bus.on(ev, () => app.updateStatus());
@@ -221,12 +412,24 @@ function boot() {
 
   // system clipboard paste of images
   window.addEventListener('paste', async (e) => {
+    // Every browser paste owns the sequence, even when it contains no image:
+    // a newer empty/text paste deliberately makes an older system read inert.
+    const token = app.beginClipboardInvocation();
     const file = [...(e.clipboardData?.files || [])].find((f) => f.type.startsWith('image/'));
     if (!file) return;
     e.preventDefault();
-    const { importImageAsLayer } = await import('./ops/io.js');
-    await importImageAsLayer(app, file);
-    toast(t('Pasted image as layer'));
+    try {
+      const { importImageAsLayer } = await import('./ops/io.js');
+      if (!app.isClipboardTokenCurrent(token)) return;
+      const result = await importImageAsLayer(
+        app, file, token, (expected) => app.isClipboardTokenCurrent(expected));
+      if (result === 'success') toast(t('Pasted image as layer'));
+      else if (result === 'failure' && app.isClipboardTokenCurrent(token)) {
+        toast(t('Could not import image'));
+      }
+    } catch {
+      if (app.isClipboardTokenCurrent(token)) toast(t('Could not import image'));
+    }
   });
 
   window.addEventListener('beforeunload', (e) => {

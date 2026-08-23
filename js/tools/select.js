@@ -22,14 +22,34 @@ class ShapeSelectTool extends Tool {
   static options = [MODE_OPT, { key: 'antialias', type: 'toggle', label: 'Anti-alias', default: false }];
 
   onDown(e) {
+    this.cancelInteraction();
+    this.app.prepareMutation();
+    this.interaction = this.app.mutationToken();
+    this.interaction.selection = this.app.selection;
     this.before = this.app.selection.snapshot();
     this.start = { x: e.ix, y: e.iy };
     this.end = { x: e.ix, y: e.iy };
     this.dragging = true;
   }
 
-  onMove(e) {
+  interactionCurrent() {
+    return this.dragging && this.app.isMutationTokenCurrent(this.interaction) &&
+      this.app.selection === this.interaction.selection;
+  }
+
+  cancelInteraction() {
     if (!this.dragging) return;
+    this.dragging = false;
+    this.interaction = null;
+    bus.emit('overlay');
+  }
+
+  deactivate() { this.cancelInteraction(); }
+  resetInteraction() { this.cancelInteraction(); }
+  onCancel() { this.cancelInteraction(); }
+
+  onMove(e) {
+    if (!this.interactionCurrent()) { this.cancelInteraction(); return; }
     let x = e.ix, y = e.iy;
     if (e.shiftKey) {
       const dx = x - this.start.x, dy = y - this.start.y;
@@ -48,8 +68,9 @@ class ShapeSelectTool extends Tool {
   }
 
   onUp() {
-    if (!this.dragging) return;
+    if (!this.interactionCurrent()) { this.cancelInteraction(); return; }
     this.dragging = false;
+    this.interaction = null;
     const r = this.rect();
     const mode = this.opts.mode || 'replace';
     if (r.w <= 1 && r.h <= 1 && mode === 'replace') {
@@ -110,13 +131,34 @@ export class LassoTool extends Tool {
   static options = [MODE_OPT];
 
   onDown(e) {
+    this.cancelInteraction();
+    this.app.prepareMutation();
+    this.interaction = this.app.mutationToken();
+    this.interaction.selection = this.app.selection;
     this.before = this.app.selection.snapshot();
     this.pts = [{ x: e.ix + 0.5, y: e.iy + 0.5 }];
     this.dragging = true;
   }
 
-  onMove(e) {
+  interactionCurrent() {
+    return this.dragging && this.app.isMutationTokenCurrent(this.interaction) &&
+      this.app.selection === this.interaction.selection;
+  }
+
+  cancelInteraction() {
     if (!this.dragging) return;
+    this.dragging = false;
+    this.interaction = null;
+    this.pts = null;
+    bus.emit('overlay');
+  }
+
+  deactivate() { this.cancelInteraction(); }
+  resetInteraction() { this.cancelInteraction(); }
+  onCancel() { this.cancelInteraction(); }
+
+  onMove(e) {
+    if (!this.interactionCurrent()) { this.cancelInteraction(); return; }
     const p = { x: e.ix + 0.5, y: e.iy + 0.5 };
     const last = this.pts[this.pts.length - 1];
     if (last.x === p.x && last.y === p.y) return;
@@ -125,9 +167,10 @@ export class LassoTool extends Tool {
   }
 
   onUp() {
-    if (!this.dragging) return;
+    if (!this.interactionCurrent()) { this.cancelInteraction(); return; }
     this.dragging = false;
-    if (this.pts.length < 3) { bus.emit('overlay'); return; }
+    this.interaction = null;
+    if (this.pts.length < 3) { this.pts = null; bus.emit('overlay'); return; }
     const pts = this.pts;
     this.app.selection.fromShape((g) => {
       g.beginPath();

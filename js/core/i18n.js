@@ -357,6 +357,8 @@ const zh = {
   'Copied': '已复制',
   'Pasted as new layer': '已粘贴为新图层',
   'Pasted image as layer': '已将图像粘贴为图层',
+  'Could not import image': '无法导入图像',
+  'Could not open image': '无法打开图像',
   'Clipboard is empty': '剪贴板为空',
   'Layer is locked': '图层已锁定',
   'Layer is hidden': '图层已隐藏',

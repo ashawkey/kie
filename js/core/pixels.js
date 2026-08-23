@@ -25,10 +25,12 @@ export class Painter {
     this._strokeMask = null; // prevents double-blending within one stroke
   }
 
-  beginStroke({ keepOriginal = false } = {}) {
-    if (this.opacity < 1 || this.hardness < 1) this._strokeMask = new Uint8Array(this.w * this.h);
-    else this._strokeMask = null;
-    this.original = keepOriginal ? new Uint8ClampedArray(this.data) : null;
+  beginStroke({ original = null } = {}) {
+    if (this.opacity < 1 || this.hardness < 1 || this.sel ||
+        (this.mode === 'paint' && this.color.a < 255)) {
+      this._strokeMask = new Uint8Array(this.w * this.h);
+    } else this._strokeMask = null;
+    this.original = original;
   }
 
   endStroke() {
@@ -54,21 +56,30 @@ export class Painter {
     a *= this.coverage(x, y) * this.opacity;
     if (a <= 0) return;
     const p = y * this.w + x;
+    // Track the effective source alpha, including paint-color alpha. This
+    // makes the strongest stamp win without repeatedly compositing a
+    // translucent color where stamps overlap.
+    let blendAlpha = this.mode === 'paint' ? (this.color.a / 255) * a : a;
+    // Color can change after beginStroke (for example, a secondary-color
+    // stroke), so enable overlap protection lazily as well.
+    if (!this._strokeMask && blendAlpha < 1) {
+      this._strokeMask = new Uint8Array(this.w * this.h);
+    }
     if (this._strokeMask) {
-      // accumulate at most `a` total per pixel per stroke
       const prev = this._strokeMask[p] / 255;
-      const want = Math.max(prev, Math.min(1, a));
-      if (want <= prev) return;
-      a = (want - prev) / (1 - prev || 1);
-      this._strokeMask[p] = Math.round(want * 255);
+      const wantByte = Math.max(this._strokeMask[p], Math.min(255, Math.round(blendAlpha * 255)));
+      if (wantByte <= this._strokeMask[p]) return;
+      const want = wantByte / 255;
+      blendAlpha = (want - prev) / (1 - prev || 1);
+      this._strokeMask[p] = wantByte;
     }
     const i = p * 4;
     const d = this.data;
     if (this.mode === 'erase') {
-      d[i + 3] = Math.round(d[i + 3] * (1 - a));
+      d[i + 3] = Math.round(d[i + 3] * (1 - blendAlpha));
       if (d[i + 3] === 0) { d[i] = d[i + 1] = d[i + 2] = 0; }
     } else {
-      const sa = (this.color.a / 255) * a;
+      const sa = blendAlpha;
       if (sa <= 0) return;
       const da = d[i + 3] / 255;
       const oa = sa + da * (1 - sa);

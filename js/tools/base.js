@@ -20,6 +20,7 @@ export class Tool {
 
   activate() {}
   deactivate() {}
+  resetInteraction() {}
   onDown(_e) {}
   onMove(_e) {}
   onUp(_e) {}
@@ -34,8 +35,11 @@ export class Tool {
  * live preview flush, and dirty-rect undo entries.
  */
 export class PixelTool extends Tool {
-  beginEdit({ keepOriginal = false } = {}) {
-    const layer = this.app.doc.active;
+  beginEdit({ needsOriginal = false, configure = null } = {}) {
+    if (this.painter) this.cancelEdit();
+    this.app.prepareMutation();
+    const doc = this.app.doc;
+    const layer = doc.active;
     if (!layer || layer.locked || !layer.visible) {
       this.app.toast(layer?.locked ? 'Layer is locked' : 'Layer is hidden');
       return null;
@@ -43,64 +47,157 @@ export class PixelTool extends Tool {
     const { width: w, height: h } = layer.canvas;
     const image = layer.ctx.getImageData(0, 0, w, h);
     this.before = new ImageData(new Uint8ClampedArray(image.data), w, h);
+    this.editDoc = doc;
+    this.editHistoryStateId = this.app.history.stateId;
     this.layer = layer;
     this.painter = new Painter(image, this.app.selection);
-    this.painter.beginStroke({ keepOriginal });
+    configure?.(this.painter);
+    // Pixel-perfect restoration reads the immutable history/cancel snapshot;
+    // do not retain a third full-layer RGBA copy inside Painter.
+    this.painter.beginStroke({ original: needsOriginal ? this.before.data : null });
+    this.app.beginPendingEdit(this);
     return this.painter;
+  }
+
+  deactivate() { this.cancelEdit(); }
+  resetInteraction() { this.cancelEdit(); }
+
+  clearEdit() {
+    this.painter = null;
+    this.before = null;
+    this.editDoc = null;
+    this.editHistoryStateId = null;
+    this.layer = null;
+    this.app.endPendingEdit(this);
+  }
+
+  abandonEdit() {
+    if (!this.painter) return false;
+    this.painter.endStroke();
+    this.clearEdit();
+    return true;
+  }
+
+  isEditCurrent() {
+    return !!this.painter && this.app.pendingEdit === this && this.app.doc === this.editDoc &&
+      this.app.history.stateId === this.editHistoryStateId &&
+      this.editDoc.layers.includes(this.layer) && this.editDoc.active === this.layer &&
+      this.layer.canvas.width === this.painter.w && this.layer.canvas.height === this.painter.h;
   }
 
   /** Push current pixels to the layer canvas so the user sees the stroke. */
   flush() {
     if (!this.painter) return;
+    if (!this.isEditCurrent()) {
+      this.abandonEdit();
+      return;
+    }
     const d = this.painter.dirty;
     if (d.empty) return;
     this.layer.ctx.putImageData(this.painter.image, 0, 0);
-    this.app.doc.touch();
+    this.editDoc.touch();
     bus.emit('layers');
   }
 
   /** Restore layer pixels to pre-stroke state (for shape previews). */
   resetPreview() {
     if (!this.painter || !this.before) return;
+    if (!this.isEditCurrent()) {
+      this.abandonEdit();
+      return;
+    }
     this.painter.image.data.set(this.before.data);
     this.painter.dirty.addRect(0, 0, this.painter.w, this.painter.h);
     if (this.painter._strokeMask) this.painter._strokeMask.fill(0);
   }
 
   endEdit(label) {
-    if (!this.painter) return;
+    if (!this.painter) return false;
     const p = this.painter;
+    const doc = this.editDoc;
+    const layer = this.layer;
+    if (!this.isEditCurrent()) {
+      this.abandonEdit();
+      return false;
+    }
     p.endStroke();
+    let entry = null;
     const d = p.dirty;
     if (!d.empty) {
       d.clampTo(p.w, p.h);
       const rect = d.rect;
-      this.layer.ctx.putImageData(p.image, 0, 0);
-      this.app.doc.touch();
-      const before = new ImageData(
-        cropData(this.before, rect),
-        rect.w,
-        rect.h,
-      );
-      const entry = pixelEntry(this.app.doc, this.layer, rect, before, label);
-      if (entry) this.app.history.push(entry);
-      bus.emit('layers');
+      if (rect.w > 0 && rect.h > 0) {
+        layer.ctx.putImageData(p.image, 0, 0);
+        doc.touch();
+        const before = new ImageData(
+          cropData(this.before, rect),
+          rect.w,
+          rect.h,
+        );
+        entry = pixelEntry(doc, layer, rect, before, label);
+        bus.emit('layers');
+      }
     }
-    this.painter = null;
-    this.before = null;
-    this.layer = null;
+    this.clearEdit();
+    if (entry) this.app.history.push(entry);
+    return true;
   }
 
-  cancelEdit() {
-    if (!this.painter) return;
-    this.resetPreview();
-    this.layer.ctx.putImageData(this.painter.image, 0, 0);
-    this.app.doc.touch();
+  stagePendingEdit() {
+    if (!this.isEditCurrent()) return null;
+    const p = this.painter;
+    const doc = this.editDoc;
+    const layer = this.layer;
+    let entry = null;
+    if (!p.dirty.empty) {
+      p.dirty.clampTo(p.w, p.h);
+      const rect = p.dirty.rect;
+      if (rect.w > 0 && rect.h > 0) {
+        const before = new ImageData(cropData(this.before, rect), rect.w, rect.h);
+        const after = new ImageData(cropData(p.image, rect), rect.w, rect.h);
+        const apply = (data) => {
+          layer.ctx.putImageData(data, rect.x, rect.y);
+          doc.touch();
+          bus.emit('layers');
+          return true;
+        };
+        entry = {
+          label: this.constructor.label,
+          undo: () => apply(before),
+          redo: () => apply(after),
+        };
+      }
+    }
+    return { painter: p, entry };
+  }
+
+  commitStagedPendingEdit(staged) {
+    if (!staged || staged.painter !== this.painter || !this.isEditCurrent()) return false;
     this.painter.endStroke();
-    this.painter = null;
-    this.before = null;
-    this.layer = null;
-    bus.emit('layers');
+    const entry = staged.entry;
+    this.clearEdit();
+    if (entry) this.app.history.push(entry);
+    return true;
+  }
+
+  commitPendingEdit() { return this.endEdit(this.constructor.label); }
+  cancelPendingEdit() { return this.cancelEdit(); }
+
+  cancelEdit() {
+    if (!this.painter) return false;
+    if (!this.isEditCurrent()) return this.abandonEdit();
+    const p = this.painter;
+    const doc = this.editDoc;
+    const layer = this.layer;
+    if (this.app.doc === doc && doc.layers.includes(layer) &&
+        layer.canvas.width === this.before.width && layer.canvas.height === this.before.height) {
+      layer.ctx.putImageData(this.before, 0, 0);
+      doc.touch();
+      bus.emit('layers');
+    }
+    p.endStroke();
+    this.clearEdit();
+    return true;
   }
 }
 

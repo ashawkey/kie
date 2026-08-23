@@ -64,8 +64,7 @@ export function installShortcuts(app) {
 
     for (const [id, match] of BINDINGS) {
       if (match(e, mod)) {
-        const cmd = app.commands.get(id);
-        if (cmd && (!cmd.enabled || cmd.enabled(app))) {
+        if (app.commandEnabled(id)) {
           e.preventDefault();
           app.run(id);
         }

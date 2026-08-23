@@ -4,7 +4,7 @@ import { dialog, toast } from './modal.js';
 import { t } from '../core/i18n.js';
 import {
   FORMATS, extFor, baseName, encodeImage, encodeDataURL, dataURLSize,
-  canUseFileSystem, pickSaveHandle, writeHandle,
+  maxExportScale, exportDimensions, canUseFileSystem, pickSaveHandle, writeHandle, saveToFile,
 } from '../ops/io.js';
 
 const fmtBytes = (n) => {
@@ -15,13 +15,18 @@ const fmtBytes = (n) => {
 };
 
 export async function showExportDialog(app) {
-  const doc = app.doc;
+  // Export / Save As is dialog-bound rather than an immediate snapshot action:
+  // any replacement or edit while it is open invalidates the whole operation.
+  const token = app.prepareAsyncMutation();
+  const doc = token.doc;
   const state = {
-    format: app.exportSettings.format,
-    scale: app.exportSettings.scale,
+    format: FORMATS[app.exportSettings.format] ? app.exportSettings.format : 'png',
+    scale: Number.isFinite(app.exportSettings.scale) && app.exportSettings.scale > 0
+      ? app.exportSettings.scale : 1,
     quality: app.exportSettings.quality,
     name: baseName(app.docName),
   };
+  state.scale = Math.min(state.scale, maxExportScale(doc, state.format));
 
   /* ---- controls ---- */
   const nameInput = el('input', { class: 'ginput', value: state.name, spellcheck: 'false' });
@@ -36,7 +41,12 @@ export async function showExportDialog(app) {
   const formatBtns = new Map();
   for (const [id, f] of Object.entries(FORMATS)) {
     const b = el('button', { class: 'gbtn seg-btn', text: f.label });
-    b.addEventListener('click', () => { state.format = id; refresh(true); });
+    b.addEventListener('click', () => {
+      state.format = id;
+      state.scale = Math.min(state.scale, maxExportScale(doc, id));
+      scaleInput.value = state.scale;
+      refresh(true);
+    });
     formatBtns.set(id, b);
     formatRow.appendChild(b);
   }
@@ -58,8 +68,13 @@ export async function showExportDialog(app) {
     class: 'ginput num', type: 'number', min: 0.1, max: 64, step: 1, value: state.scale,
   });
   scaleInput.addEventListener('input', () => {
-    const v = parseFloat(scaleInput.value);
-    if (!Number.isNaN(v) && v > 0) { state.scale = Math.min(64, v); refresh(); }
+    const v = Number(scaleInput.value);
+    const max = maxExportScale(doc, state.format);
+    if (Number.isFinite(v) && v > 0) {
+      state.scale = Math.min(max, v);
+      if (v > max) scaleInput.value = max;
+      refresh();
+    }
   });
   scaleInput.addEventListener('keydown', (e) => e.stopPropagation());
 
@@ -101,20 +116,32 @@ export async function showExportDialog(app) {
   // Encoding is synchronous so the preview and the byte count always agree;
   // debouncing keeps dragging the quality slider responsive on large images.
   const recompute = () => {
-    const url = encodeDataURL(app, state);
-    preview.src = url;
-    sizeOut.textContent = fmtBytes(dataURLSize(url));
+    if (!app.isMutationTokenCurrent(token)) return;
+    try {
+      const url = encodeDataURL(app, state, doc);
+      const size = dataURLSize(url);
+      if (!size) throw new Error('Image encoder failed');
+      preview.src = url;
+      sizeOut.textContent = fmtBytes(size);
+    } catch {
+      preview.removeAttribute('src');
+      sizeOut.textContent = t('Could not export image');
+    }
   };
   const recomputeSoon = debounce(recompute, 90);
 
   function refresh(immediate = false) {
     const f = FORMATS[state.format];
+    const maxScale = maxExportScale(doc, state.format);
+    scaleInput.max = maxScale;
     for (const [id, b] of formatBtns) b.classList.toggle('active', id === state.format);
-    for (const [s, b] of scaleBtns) b.classList.toggle('active', s === state.scale);
+    for (const [s, b] of scaleBtns) {
+      b.classList.toggle('active', s === state.scale);
+      b.disabled = s > maxScale;
+    }
     extLabel.textContent = `.${f.ext}`;
     qualityRow.style.display = f.lossless ? 'none' : '';
-    const w = Math.max(1, Math.round(doc.width * state.scale));
-    const h = Math.max(1, Math.round(doc.height * state.scale));
+    const { width: w, height: h } = exportDimensions(doc, state);
     dimOut.textContent = `${w} × ${h} px`;
 
     // Fit the preview to the box. Small images are magnified by a whole number
@@ -144,42 +171,59 @@ export async function showExportDialog(app) {
     size: 'export',
   });
 
-  if (!result) return;
+  if (!result || !app.isMutationTokenCurrent(token)) return;
 
   // Remember the settings for the next Save.
   Object.assign(app.exportSettings, {
     format: state.format, scale: state.scale, quality: state.quality,
   });
 
-  const blob = await encodeImage(app, state);
+  const stateId = token.stateId;
+  let blob;
+  try { blob = await encodeImage(app, state, doc); }
+  catch {
+    if (app.isMutationTokenCurrent(token)) toast(t('Could not export image'));
+    return;
+  }
+  if (!app.isMutationTokenCurrent(token)) return;
   const filename = `${baseName(state.name) || 'untitled'}.${extFor(state.format)}`;
 
   if (canUseFileSystem()) {
     try {
       const handle = await pickSaveHandle(state.name, state.format);
-      await writeHandle(handle, blob);
-      app.linkFile(handle, handle.name);
-      toast(`${t('Saved')} ${handle.name}`);
+      if (!app.isMutationTokenCurrent(token)) return;
+      const written = await writeHandle(handle, blob, () => app.isMutationTokenCurrent(token));
+      if (!written || !app.isMutationTokenCurrent(token)) return;
+      app.linkFile(handle, handle.name, stateId, doc, token.documentEpoch);
+      if (app.isMutationTokenCurrent(token)) toast(`${t('Saved')} ${handle.name}`);
       return;
     } catch (e) {
       if (e?.name === 'AbortError') return; // user cancelled the picker
-      // fall through to a plain download
+      // fall through to a plain download only for the same untouched source.
     }
   }
+  if (!app.isMutationTokenCurrent(token)) return;
   downloadBlob(blob, filename);
+  if (!app.isMutationTokenCurrent(token)) return;
   app.docName = filename;
-  app.markSaved();
-  toast(`${t('Exported')} ${filename}`);
+  app.markSaved(stateId, doc, token.documentEpoch);
+  if (app.isMutationTokenCurrent(token)) toast(`${t('Exported')} ${filename}`);
 }
 
 /** Save to the linked file, or fall back to the dialog when there is none. */
 export async function saveDocument(app) {
+  app.prepareMutation();
   if (!app.fileHandle) return showExportDialog(app);
-  const { saveToFile } = await import('../ops/io.js');
   try {
-    await saveToFile(app, app.exportSettings);
-    app.markSaved();
-    toast(`${t('Saved')} ${app.docName}`);
+    const saved = await saveToFile(app, app.exportSettings);
+    if (!saved) return showExportDialog(app);
+    if (!saved.written) return;
+    if (app.doc === saved.doc && app.documentEpoch === saved.documentEpoch &&
+        app.fileHandle === saved.handle) {
+      app.markSaved(saved.stateId, saved.doc, saved.documentEpoch);
+    }
+    if (app.doc === saved.doc && app.documentEpoch === saved.documentEpoch &&
+        app.fileHandle === saved.handle) toast(`${t('Saved')} ${saved.handle.name}`);
   } catch (e) {
     if (e?.name === 'AbortError') return;
     toast(t('Could not save — use Export instead'));

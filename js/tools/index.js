@@ -87,11 +87,17 @@ export class ToolManager {
 
   select(id) {
     if (this.activeId === id || !this.registry.has(id)) return;
+    this.app.settlePendingEdit('commit');
     this.active?.deactivate?.();
     this.activeId = id;
     this.active = this.get(id);
     this.active.activate?.();
     bus.emit('tool');
+  }
+
+  /** Clear document-bound gesture state while preserving tool/options choice. */
+  resetInteractions() {
+    for (const tool of this.instances.values()) tool.resetInteraction?.();
   }
 
   usesColor(id) { return COLOR_TOOLS.has(id); }

@@ -146,13 +146,17 @@ export function buildHistoryPanel(app) {
     const mk = (label, cls, onclick) =>
       el('button', { class: `history-item ${cls}`, onclick }, [el('span', { class: 'dot' }), el('span', { text: label })]);
 
+    const prepareNavigation = () => app.settleHistoryNavigation();
+
     list.appendChild(mk(t('Document opened'), h.past.length ? '' : 'current', () => {
+      if (prepareNavigation()) return;
       while (h.canUndo()) h.undo();
     }));
 
     h.past.forEach((e, i) => {
       const isLast = i === h.past.length - 1;
       list.appendChild(mk(t(e.label), isLast ? 'current' : '', () => {
+        if (prepareNavigation()) return;
         while (h.past.length > i + 1) h.undo();
         while (h.past.length < i + 1 && h.canRedo()) h.redo();
       }));
@@ -160,6 +164,7 @@ export function buildHistoryPanel(app) {
 
     [...h.future].reverse().forEach((e, i) => {
       list.appendChild(mk(t(e.label), 'future', () => {
+        if (prepareNavigation()) return;
         const steps = i + 1;
         for (let k = 0; k < steps && h.canRedo(); k++) h.redo();
       }));

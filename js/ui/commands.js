@@ -12,8 +12,8 @@ import {
   clearSelection, fillSelection,
 } from '../ops/image.js';
 import {
-  openImageAsDocument, importImageAsLayer, exportImage, openWithPicker,
-  saveProject, loadProject, copySelection, pasteClipboard, pasteFromSystem,
+  importImageAsLayer, exportImage, openWithPicker,
+  saveProject, loadProject, copySelection, pasteFromSystem,
 } from '../ops/io.js';
 import { showExportDialog, saveDocument } from './export.js';
 import { beginSession, commitSession } from '../tools/transform.js';
@@ -33,12 +33,24 @@ export function registerCommands(app) {
   add('file.new', {
     label: 'New…', key: `${MOD}N`, icon: 'plus',
     run: async () => {
+      const token = app.beginReplacement();
       const presets = [
         ['16 × 16', 16, 16], ['32 × 32', 32, 32], ['64 × 64', 64, 64],
         ['128 × 128', 128, 128], ['256 × 256', 256, 256], ['512 × 512', 512, 512],
       ];
       const grid = el('div', { class: 'preset-grid' });
       let api = null;
+      // Build presets before opening the modal; dialog consumes this node
+      // synchronously and supplies its input API through onChange.
+      for (const [label, w, h] of presets) {
+        grid.appendChild(el('button', {
+          class: 'gbtn',
+          onclick: () => {
+            api.inputs.width.value = w; api.values.width = w;
+            api.inputs.height.value = h; api.values.height = h;
+          },
+        }, [el('span', { text: label }), el('small', { text: `${w}×${h} px` })]));
+      }
       const r = await dialog({
         title: t('New Image'),
         subtitle: t('Pick a preset or enter a custom size.'),
@@ -54,43 +66,45 @@ export function registerCommands(app) {
         confirm: t('Create'),
         onChange: (_v, a) => { api = a; },
       });
-      // preset buttons fill the inputs live
-      for (const [label, w, h] of presets) {
-        grid.appendChild(el('button', {
-          class: 'gbtn',
-          onclick: () => {
-            api.inputs.width.value = w; api.values.width = w;
-            api.inputs.height.value = h; api.values.height = h;
-          },
-        }, [el('span', { text: label }), el('small', { text: `${w}×${h} px` })]));
-      }
-      if (!r) return;
+      if (!r || !app.isReplacementTokenCurrent(token)) return;
       const fill = r.background === 'white' ? '#ffffff'
         : r.background === 'black' ? '#000000'
         : r.background === 'primary' ? rgbaCss(app.color.primary) : null;
-      app.setDoc(Doc.blank(Math.round(r.width), Math.round(r.height), fill), 'untitled');
+      await app.setDoc(Doc.blank(Math.round(r.width), Math.round(r.height), fill), 'untitled', null, token);
     },
   });
 
   add('file.open', {
     label: 'Open Image…', key: `${MOD}O`,
     run: async () => {
+      const token = app.beginReplacement();
       // Prefer the picker that yields a writable handle, so Save works later.
+      // Cancellation is inert; only API unavailability falls back. Once a file
+      // was selected, app.openFile owns decode failure feedback and no second
+      // picker may be shown.
       try {
-        if (await openWithPicker(app)) return;
+        if (await openWithPicker(app, token)) return;
       } catch (e) {
         if (e?.name === 'AbortError') return;
+        if (app.isReplacementTokenCurrent(token)) app.toast('Could not open image');
+        return;
       }
+      if (!app.isReplacementTokenCurrent(token)) return;
       const f = await pickFile('image/*');
-      if (f) await openImageAsDocument(app, f);
+      if (f && app.isReplacementTokenCurrent(token)) await app.openFile(f, null, token);
     },
   });
 
   add('file.import', {
     label: 'Import as Layer…',
     run: async () => {
+      const token = app.prepareAsyncMutation();
       const f = await pickFile('image/*');
-      if (f) await importImageAsLayer(app, f);
+      if (!f || !app.isMutationTokenCurrent(token)) return;
+      const result = await importImageAsLayer(app, f, token);
+      if (result === 'failure' && app.isMutationTokenCurrent(token)) {
+        toast(t('Could not import image'));
+      }
     },
   });
 
@@ -107,16 +121,32 @@ export function registerCommands(app) {
 
   add('file.export.png', {
     label: 'Quick Export PNG',
-    run: async () => { await exportImage(app, { format: 'png' }); toast(t('Exported PNG')); },
+    run: async () => {
+      try {
+        const blob = await exportImage(app, { format: 'png' });
+        if (blob) toast(t('Exported PNG'));
+      } catch { toast(t('Could not export image')); }
+    },
   });
 
-  add('file.project.save', { label: 'Save Project (.glassx)', run: () => { saveProject(app); toast(t('Project saved')); } });
+  add('file.project.save', {
+    label: 'Save Project (.glassx)',
+    run: () => {
+      try {
+        if (saveProject(app)) toast(t('Project saved'));
+      } catch (e) {
+        app.toast(e?.message || 'Project cannot be saved');
+      }
+    },
+  });
   add('file.project.open', {
     label: 'Open Project…',
     run: async () => {
+      const token = app.beginReplacement();
       const f = await pickFile('.glassx,application/json');
-      if (!f) return;
-      try { await loadProject(app, f); } catch (e) { toast(t('Could not open project')); }
+      if (!f || !app.isReplacementTokenCurrent(token)) return;
+      try { await loadProject(app, f, token); }
+      catch (e) { if (app.isReplacementTokenCurrent(token)) toast(t('Could not open project')); }
     },
   });
 
@@ -141,7 +171,7 @@ export function registerCommands(app) {
     label: 'Cut', key: `${MOD}X`,
     run: () => { copySelection(app); clearSelection(app); toast(t('Cut')); },
   });
-  add('edit.paste', { label: 'Paste', key: `${MOD}V`, run: async () => { if (!(await pasteFromSystem(app))) pasteClipboard(app); } });
+  add('edit.paste', { label: 'Paste', key: `${MOD}V`, run: () => pasteFromSystem(app) });
   add('edit.clear', { label: 'Clear', key: 'Del', icon: 'trash', run: () => clearSelection(app) });
   add('edit.fillPrimary', { label: 'Fill with Primary', key: `${ALT}Del`, run: () => fillSelection(app, rgbaCss(app.color.primary)) });
   add('edit.fillSecondary', { label: 'Fill with Secondary', run: () => fillSelection(app, rgbaCss(app.color.secondary)) });
@@ -164,7 +194,8 @@ export function registerCommands(app) {
   add('image.size', {
     label: 'Image Size…', key: `${MOD}${ALT}I`,
     run: async () => {
-      const doc = app.doc;
+      const token = app.prepareAsyncMutation();
+      const doc = token.doc;
       const r = await dialog({
         title: t('Image Size'),
         subtitle: `Currently ${doc.width} × ${doc.height} px.`,
@@ -175,7 +206,8 @@ export function registerCommands(app) {
         ],
         confirm: t('Resize'),
       });
-      if (!r) return;
+      if (!r || !app.isMutationTokenCurrent(token)) return;
+      app.prepareMutation();
       resizeImage(app, Math.round(r.width), Math.round(r.height), r.smooth);
       app.view.fit(app.doc.width, app.doc.height);
     },
@@ -184,7 +216,8 @@ export function registerCommands(app) {
   add('image.canvasSize', {
     label: 'Canvas Size…', key: `${MOD}${ALT}C`,
     run: async () => {
-      const doc = app.doc;
+      const token = app.prepareAsyncMutation();
+      const doc = token.doc;
       const r = await dialog({
         title: t('Canvas Size'),
         subtitle: t('Grows or crops the canvas without scaling pixels.'),
@@ -200,7 +233,8 @@ export function registerCommands(app) {
         ],
         confirm: t('Apply'),
       });
-      if (!r) return;
+      if (!r || !app.isMutationTokenCurrent(token)) return;
+      app.prepareMutation();
       const w = Math.round(r.width), h = Math.round(r.height);
       const ax = r.anchor.includes('left') ? 0 : r.anchor.includes('right') ? 1 : 0.5;
       const ay = r.anchor.includes('top') ? 0 : r.anchor.includes('bottom') ? 1 : 0.5;
@@ -254,6 +288,7 @@ export function registerCommands(app) {
   /* ---------------- Select ---------------- */
 
   const selectionEdit = (label, fn) => {
+    app.prepareMutation();
     const before = app.selection.snapshot();
     fn();
     const after = app.selection.snapshot();
@@ -289,6 +324,7 @@ export function registerCommands(app) {
       icon: 'sliders',
       run: async () => {
         if (!f.params) { applyFilter(app, f.label, f.run); return; }
+        const token = app.prepareAsyncMutation();
         const preview = el('img', { id: 'filter-preview', class: 'checker' });
         const src = previewSource(app);
         const values = await dialog({
@@ -298,7 +334,8 @@ export function registerCommands(app) {
           confirm: t('Apply'),
           onChange: (v) => { preview.src = renderPreview(src, f, v); },
         });
-        if (!values) return;
+        if (!values || !app.isMutationTokenCurrent(token)) return;
+        app.prepareMutation();
         applyFilter(app, f.label, f.run, values);
       },
     });

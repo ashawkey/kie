@@ -8,6 +8,7 @@ import { clamp, rgbToHsv, hsvToRgb } from '../core/util.js';
  * selection mask and pushing a single undo entry.
  */
 export function applyFilter(app, label, fn, params = {}) {
+  app.prepareMutation();
   const layer = app.doc.active;
   if (!layer || layer.locked) { app.toast('Layer is locked'); return; }
   const { width: w, height: h } = layer.canvas;

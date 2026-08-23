@@ -3,6 +3,7 @@ import { el, $ } from '../core/util.js';
 import { t } from '../core/i18n.js';
 
 let layer;
+let activeModal = null;
 
 function ensureLayer() {
   if (!layer) layer = $('#modal-layer');
@@ -11,11 +12,13 @@ function ensureLayer() {
 
 /**
  * Show a dialog. `fields` is a list of descriptors; resolves with the values
- * object on confirm, or null on cancel.
+ * object on confirm, or null on cancel. Opening one cancels the active dialog.
  */
 export function dialog({ title, subtitle, fields = [], confirm, cancel, body, onChange, size }) {
   confirm = confirm ?? t('OK');
   cancel = cancel === null ? null : (cancel ?? t('Cancel'));
+  activeModal?.close(null);
+
   return new Promise((resolve) => {
     const root = ensureLayer();
     const values = {};
@@ -44,30 +47,51 @@ export function dialog({ title, subtitle, fields = [], confirm, cancel, body, on
       el('div', { class: 'modal-actions' }, [cancelBtn, okBtn].filter(Boolean)),
     ]);
 
-    const api = { values, inputs, modal, close: (v) => close(v) };
-
-    root.innerHTML = '';
-    root.appendChild(modal);
-    root.classList.add('open');
+    let closed = false;
+    let focusTimer = null;
+    const record = { close };
+    const api = { values, inputs, modal, close };
 
     function close(result) {
-      root.classList.remove('open');
-      root.innerHTML = '';
+      if (closed) return;
+      closed = true;
+      if (focusTimer !== null) clearTimeout(focusTimer);
       document.removeEventListener('keydown', onKey, true);
+      root.removeEventListener('mousedown', onBackdrop);
+      if (activeModal === record) {
+        activeModal = null;
+        root.classList.remove('open');
+        root.innerHTML = '';
+      }
       resolve(result);
     }
 
     function onKey(e) {
+      if (activeModal !== record) return;
       if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); close(null); }
-      else if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') { e.preventDefault(); close({ ...values }); }
+      else if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') {
+        e.stopPropagation();
+        e.preventDefault();
+        close({ ...values });
+      }
     }
+
+    function onBackdrop(e) {
+      if (activeModal === record && e.target === root) close(null);
+    }
+
+    activeModal = record;
+    root.innerHTML = '';
+    root.appendChild(modal);
+    root.classList.add('open');
 
     okBtn.addEventListener('click', () => close({ ...values }));
     cancelBtn?.addEventListener('click', () => close(null));
-    root.addEventListener('mousedown', (e) => { if (e.target === root) close(null); });
+    root.addEventListener('mousedown', onBackdrop);
     document.addEventListener('keydown', onKey, true);
 
-    setTimeout(() => {
+    focusTimer = setTimeout(() => {
+      if (activeModal !== record) return;
       const first = modal.querySelector('input:not([type=range]), select');
       (first || okBtn).focus();
       if (first?.select) first.select();

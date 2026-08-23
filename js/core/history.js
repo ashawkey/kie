@@ -1,7 +1,6 @@
 // Undo/redo. Entries are {label, undo(), redo()} closures.
 // Pixel edits use dirty-rect ImageData snapshots to keep memory bounded.
 import { bus } from './bus.js';
-import { cloneCanvas } from './util.js';
 
 const LIMIT = 120;
 
@@ -9,9 +8,18 @@ export class History {
   constructor() {
     this.past = [];
     this.future = [];
+    this._nextStateId = 1;
+    this.stateId = 0;
+    // Monotonic even when undo/redo returns to an earlier logical state.
+    // Long-lived gestures and dialogs use this to reject stale completions.
+    this.revision = 0;
   }
 
   push(entry) {
+    entry.beforeStateId = this.stateId;
+    entry.afterStateId = this._nextStateId++;
+    this.stateId = entry.afterStateId;
+    this.revision++;
     this.past.push(entry);
     if (this.past.length > LIMIT) this.past.shift();
     this.future.length = 0;
@@ -28,24 +36,42 @@ export class History {
   canRedo() { return this.future.length > 0; }
 
   undo() {
-    const e = this.past.pop();
-    if (!e) return;
-    e.undo();
+    const e = this.past[this.past.length - 1];
+    if (!e) return false;
+    try {
+      if (e.undo() === false) return false;
+    } catch {
+      return false;
+    }
+    this.past.pop();
     this.future.push(e);
+    this.stateId = e.beforeStateId;
+    this.revision++;
     bus.emit('history');
+    return true;
   }
 
   redo() {
-    const e = this.future.pop();
-    if (!e) return;
-    e.redo();
+    const e = this.future[this.future.length - 1];
+    if (!e) return false;
+    try {
+      if (e.redo() === false) return false;
+    } catch {
+      return false;
+    }
+    this.future.pop();
     this.past.push(e);
+    this.stateId = e.afterStateId;
+    this.revision++;
     bus.emit('history');
+    return true;
   }
 
   clear() {
     this.past.length = 0;
     this.future.length = 0;
+    this.stateId = this._nextStateId++;
+    this.revision++;
     bus.emit('history');
   }
 }
@@ -94,14 +120,20 @@ export function pixelEntry(doc, layer, rect, before, label = 'Paint') {
 }
 
 /** Full-canvas snapshot entry (for transforms / whole-layer ops). */
-export function layerEntry(doc, layer, beforeCanvas, label) {
-  const after = cloneCanvas(layer.canvas);
+export function layerEntry(doc, layer, before, label) {
+  const after = layer.ctx.getImageData(0, 0, layer.canvas.width, layer.canvas.height);
   const apply = (src) => {
-    layer.ctx.setTransform(1, 0, 0, 1, 0, 0);
-    layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
-    layer.ctx.drawImage(src, 0, 0);
+    if (src instanceof ImageData) {
+      layer.ctx.putImageData(src, 0, 0);
+    } else {
+      layer.ctx.save();
+      layer.ctx.setTransform(1, 0, 0, 1, 0, 0);
+      layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
+      layer.ctx.drawImage(src, 0, 0);
+      layer.ctx.restore();
+    }
     doc.touch();
     bus.emit('layers');
   };
-  return { label, undo: () => apply(beforeCanvas), redo: () => apply(after) };
+  return { label, undo: () => apply(before), redo: () => apply(after) };
 }

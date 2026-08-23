@@ -2,7 +2,7 @@
 import { bus } from '../core/bus.js';
 import { el, makeCanvas, ctx2d } from '../core/util.js';
 import { icon } from './icons.js';
-import { addLayer, duplicateLayer, deleteLayer, moveLayer, mergeDown, setLayerProp } from '../ops/image.js';
+import { moveLayer, setLayerProp } from '../ops/image.js';
 import { t } from '../core/i18n.js';
 
 const BLENDS = [
@@ -37,17 +37,17 @@ export function buildLayersPanel(app) {
 
   const tools = el('div', { class: 'layer-tools' }, [
     btn('plus', 'New layer', 'Add an empty layer above the current one.', 'layer.new',
-      () => addLayer(app)),
+      () => app.run('layer.new')),
     btn('copy', 'Duplicate', 'Copy the current layer, pixels and all.', 'layer.duplicate',
-      () => duplicateLayer(app)),
+      () => app.run('layer.duplicate')),
     btn('merge', 'Merge down', 'Combine this layer into the one below it.', 'layer.mergeDown',
-      () => mergeDown(app)),
+      () => app.run('layer.mergeDown')),
     btn('up', 'Raise', 'Move this layer one step up the stack.', 'layer.raise',
-      () => moveLayer(app, 1)),
+      () => app.run('layer.raise')),
     btn('down', 'Lower', 'Move this layer one step down the stack.', 'layer.lower',
-      () => moveLayer(app, -1)),
+      () => app.run('layer.lower')),
     btn('trash', 'Delete', 'Remove this layer from the document.', 'layer.delete',
-      () => deleteLayer(app)),
+      () => app.run('layer.delete')),
   ]);
 
   const opacityLabel = el('span', { class: 'glabel', text: t('Opacity') });
@@ -59,14 +59,113 @@ export function buildLayersPanel(app) {
   ]);
 
   blendSelect.addEventListener('change', () => {
+    app.prepareMutation();
     const l = app.doc.active;
     if (l) setLayerProp(app, l, 'blend', blendSelect.value, 'Blend Mode');
   });
 
-  let opacityBefore = null;
-  opacityRange.addEventListener('pointerdown', () => { opacityBefore = app.doc.active?.opacity ?? 1; });
+  let opacityEdit = null;
+  let opacityGesture = null;
+  const gestureCurrent = () => opacityGesture && app.isMutationTokenCurrent(opacityGesture.token) &&
+    app.doc.layers.includes(opacityGesture.layer);
+  const startOpacityGesture = () => {
+    const layer = app.doc.active;
+    opacityGesture = layer ? { token: app.mutationToken(), layer } : null;
+  };
+  const clearOpacityEdit = () => { opacityEdit = null; };
+  const opacityEditCurrent = (edit) => !!edit && app.pendingEdit === edit &&
+    app.isMutationTokenCurrent(edit.token) && app.doc === edit.doc &&
+    edit.doc.layers.includes(edit.layer);
+  const discardStaleOpacityEdit = (edit) => {
+    // A stale preview may still belong to the current layer (for example after
+    // direct history movement). Restore it before dropping ownership so no
+    // untracked opacity remains visible.
+    if (app.doc === edit.doc && edit.doc.layers.includes(edit.layer)) {
+      edit.layer.opacity = edit.before;
+      edit.doc.touch();
+      bus.emit('doc');
+      bus.emit('layers');
+    }
+    if (opacityEdit === edit) clearOpacityEdit();
+    app.endPendingEdit(edit);
+  };
+  const finishOpacityEdit = (commit, external = false) => {
+    // Commands/history/replacement settle through the edit callbacks rather
+    // than through this control's own change/pointer completion. Retire that
+    // gesture immediately so already-queued input/change events cannot revive
+    // the preview after its owner has moved on.
+    if (external) opacityGesture = null;
+    const edit = opacityEdit;
+    if (!edit || app.pendingEdit !== edit) return false;
+    if (!opacityEditCurrent(edit)) {
+      discardStaleOpacityEdit(edit);
+      return false;
+    }
+    const { doc, layer, before } = edit;
+    const after = layer.opacity;
+    if (!commit || after === before) {
+      layer.opacity = before;
+      doc.touch();
+      bus.emit('doc');
+      bus.emit('layers');
+      clearOpacityEdit();
+      app.endPendingEdit(edit);
+      return true;
+    }
+    // End app-level ownership before using the ordinary property helper, or
+    // its transaction guard would recursively settle this same slider edit.
+    clearOpacityEdit();
+    app.endPendingEdit(edit);
+    layer.opacity = before;
+    setLayerProp(app, layer, 'opacity', after, 'Layer Opacity');
+    return true;
+  };
+  const beginOpacityEdit = () => {
+    if (opacityEdit) {
+      if (opacityEditCurrent(opacityEdit)) return opacityEdit.layer;
+      discardStaleOpacityEdit(opacityEdit);
+    }
+    if (!gestureCurrent()) return null;
+    app.prepareMutation();
+    if (!gestureCurrent()) return null;
+    const layer = opacityGesture.layer;
+    const edit = {
+      doc: app.doc,
+      layer,
+      token: app.mutationToken(),
+      before: layer.opacity,
+      stagePendingEdit: () => opacityEditCurrent(edit) ? { after: layer.opacity } : null,
+      commitStagedPendingEdit: (staged) => {
+        if (!staged || !opacityEditCurrent(edit)) return false;
+        layer.opacity = staged.after;
+        return finishOpacityEdit(true, true);
+      },
+      commitPendingEdit: () => finishOpacityEdit(true, true),
+      cancelPendingEdit: () => finishOpacityEdit(false, true),
+    };
+    opacityEdit = edit;
+    app.beginPendingEdit(edit);
+    return layer;
+  };
+  opacityRange.addEventListener('pointerdown', () => {
+    startOpacityGesture();
+    beginOpacityEdit();
+  });
+  // Keyboard and assistive-technology gestures establish a fresh origin just
+  // like pointerdown. A cancelled/replaced gesture cannot be resurrected by a
+  // queued input/change event from this persistent range element.
+  opacityRange.addEventListener('focus', startOpacityGesture);
+  opacityRange.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') startOpacityGesture();
+  });
+  opacityRange.addEventListener('click', (e) => {
+    // A synthetic click is the activation primitive exposed by many assistive
+    // technologies. Trusted pointer clicks already established their origin
+    // on pointerdown and must not turn a stale trailing click into a gesture.
+    if (e.detail === 0) startOpacityGesture();
+  });
   opacityRange.addEventListener('input', () => {
-    const l = app.doc.active;
+    const l = beginOpacityEdit();
     if (!l) return;
     l.opacity = parseInt(opacityRange.value, 10) / 100;
     opacityVal.textContent = `${opacityRange.value}%`;
@@ -74,14 +173,23 @@ export function buildLayersPanel(app) {
     app.doc.touch();
     bus.emit('layers');
   });
-  opacityRange.addEventListener('change', () => {
-    const l = app.doc.active;
-    if (!l || opacityBefore === null) return;
-    const after = l.opacity;
-    if (after === opacityBefore) return;
-    l.opacity = opacityBefore;
-    setLayerProp(app, l, 'opacity', after, 'Layer Opacity');
-    opacityBefore = null;
+  opacityRange.addEventListener('change', () => finishOpacityEdit(true));
+  // A click on the current thumb commonly emits no input/change event. End
+  // the pending transaction on pointerup so this no-op does not stay dirty.
+  opacityRange.addEventListener('pointerup', () => {
+    finishOpacityEdit(true);
+    opacityGesture = null;
+  });
+  opacityRange.addEventListener('pointercancel', () => {
+    finishOpacityEdit(false);
+    opacityGesture = null;
+  });
+  opacityRange.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && opacityEdit) {
+      e.preventDefault();
+      finishOpacityEdit(false);
+      opacityGesture = null;
+    }
   });
 
   let dragId = null;
@@ -122,14 +230,18 @@ export function buildLayersPanel(app) {
         class: 'vis',
         'data-tip': layer.visible ? t('Hide layer') : t('Show layer'),
         'data-tip-side': 'left',
-        onclick: (e) => { e.stopPropagation(); setLayerProp(app, layer, 'visible', !layer.visible, 'Toggle Visibility'); },
+        onclick: (e) => {
+          e.stopPropagation();
+          app.prepareMutation();
+          setLayerProp(app, layer, 'visible', !layer.visible, 'Toggle Visibility');
+        },
       }, [icon(layer.visible ? 'eye' : 'eyeOff')]);
 
       const nameEl = el('div', { class: 'lname', text: layer.name });
       const row = el('div', {
         class: 'layer-row' + (active ? ' active' : ''),
         draggable: 'true',
-        onclick: () => doc.setActive(layer.id),
+        onclick: () => { app.prepareMutation(); doc.setActive(layer.id); },
         ondblclick: (e) => {
           if (e.target === vis || vis.contains(e.target)) return;
           startRename(layer, nameEl);
@@ -166,6 +278,7 @@ export function buildLayersPanel(app) {
         if (from < 0 || to < 0) return;
         const id = dragId;
         dragId = null;
+        app.prepareMutation();
         moveLayer(app, to - from, id);
       });
       row.addEventListener('dragend', () => { dragId = null; });
@@ -190,7 +303,10 @@ export function buildLayersPanel(app) {
     const commit = () => {
       const v = input.value.trim() || layer.name;
       input.replaceWith(nameEl);
-      if (v !== layer.name) setLayerProp(app, layer, 'name', v, 'Rename Layer');
+      if (v !== layer.name) {
+        app.prepareMutation();
+        setLayerProp(app, layer, 'name', v, 'Rename Layer');
+      }
       else render();
     };
     input.addEventListener('blur', commit);

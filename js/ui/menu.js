@@ -112,7 +112,7 @@ export function buildMenuBar(app, root) {
         if (id === '-') { pop.appendChild(el('div', { class: 'gdivider h' })); continue; }
         const cmd = app.commands.get(id);
         if (!cmd) continue;
-        const disabled = cmd.enabled ? !cmd.enabled(app) : false;
+        const disabled = !app.commandEnabled(id);
         const item = el('button', {
           class: 'menu-item',
           disabled,

@@ -2,6 +2,7 @@
 import { Tool } from './base.js';
 import { bus } from '../core/bus.js';
 import { resizeCanvasTo } from '../ops/image.js';
+import { validateEditorDimensions } from '../core/util.js';
 
 export class HandTool extends Tool {
   static id = 'hand';
@@ -17,6 +18,8 @@ export class HandTool extends Tool {
     this.last = { x: e.sx, y: e.sy };
   }
   onUp() { this.last = null; }
+  deactivate() { this.last = null; }
+  resetInteraction() { this.last = null; }
   statusHint() { return 'Drag to pan · Space+drag works with any tool'; }
 }
 
@@ -46,7 +49,17 @@ export class CropTool extends Tool {
     bus.emit('overlay');
   }
 
-  deactivate() { this.box = null; this.mode = null; bus.emit('overlay'); }
+  clearInteraction() {
+    this.box = null;
+    this.mode = null;
+    this.start = null;
+    this.startBox = null;
+    this.grab = null;
+    bus.emit('overlay');
+  }
+
+  deactivate() { this.clearInteraction(); }
+  resetInteraction() { this.clearInteraction(); }
 
   handleAt(e) {
     if (!this.box) return null;
@@ -120,8 +133,19 @@ export class CropTool extends Tool {
 
   apply() {
     const b = this.box;
-    if (!b || b.w < 1 || b.h < 1) return;
-    resizeCanvasTo(this.app, Math.round(b.w), Math.round(b.h), -Math.round(b.x), -Math.round(b.y), 'Crop');
+    if (!b) return;
+    const { width, height } = this.app.doc;
+    try { validateEditorDimensions(width, height); }
+    catch { this.app.toast?.('Invalid document dimensions'); return; }
+    // Crop only removes document edges. Round the requested edges, then
+    // intersect them with the current integer document before docOp snapshots.
+    const x0 = Math.max(0, Math.min(width, Math.round(Math.min(b.x, b.x + b.w))));
+    const y0 = Math.max(0, Math.min(height, Math.round(Math.min(b.y, b.y + b.h))));
+    const x1 = Math.max(0, Math.min(width, Math.round(Math.max(b.x, b.x + b.w))));
+    const y1 = Math.max(0, Math.min(height, Math.round(Math.max(b.y, b.y + b.h))));
+    const w = x1 - x0, h = y1 - y0;
+    if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1) return;
+    if (!resizeCanvasTo(this.app, w, h, -x0, -y0, 'Crop')) return;
     this.box = null;
     this.app.view.fit(this.app.doc.width, this.app.doc.height);
   }

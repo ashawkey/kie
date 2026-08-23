@@ -2,18 +2,20 @@
 // drawn by the renderer with a live affine transform, then baked on commit.
 import { Tool } from './base.js';
 import { bus } from '../core/bus.js';
-import { makeCanvas, ctx2d, cloneCanvas } from '../core/util.js';
-import { layerEntry } from '../core/history.js';
+import { makeCanvas, ctx2d } from '../core/util.js';
 
 /** A floating piece of pixels being moved/transformed. */
 export class TransformSession {
-  constructor(app, { source, rect, layer, lifted, selectionBefore, layerBefore }) {
+  constructor(app, { source, rect, layer, lifted, selectionBefore, layerBeforeData, docDirtyBefore }) {
     this.app = app;
     this.source = source;      // canvas holding the lifted pixels
     this.layer = layer;
     this.lifted = lifted;      // true when pixels were cut out of the layer
     this.selectionBefore = selectionBefore;
-    this.layerBefore = layerBefore;
+    this.layerBeforeData = layerBeforeData;
+    this.docDirtyBefore = docDirtyBefore;
+    this.sourceX = rect.x;
+    this.sourceY = rect.y;
     this.x = rect.x;           // dest box in image space
     this.y = rect.y;
     this.w = rect.w;
@@ -59,31 +61,53 @@ export class TransformSession {
   }
 }
 
+function maskCanvasForRect(mask, docWidth, rect) {
+  const canvas = makeCanvas(rect.w, rect.h);
+  const g = ctx2d(canvas);
+  const image = g.createImageData(rect.w, rect.h);
+  for (let y = 0; y < rect.h; y++) {
+    let src = (rect.y + y) * docWidth + rect.x;
+    let dst = y * rect.w * 4;
+    for (let x = 0; x < rect.w; x++, src++, dst += 4) {
+      image.data[dst] = image.data[dst + 1] = image.data[dst + 2] = 255;
+      image.data[dst + 3] = mask[src];
+    }
+  }
+  g.putImageData(image, 0, 0);
+  return canvas;
+}
+
 /** Lift pixels from the active layer (whole layer, or selection contents). */
 export function beginSession(app, { cut = true } = {}) {
+  app.settlePendingEdit('commit');
   const layer = app.doc.active;
   if (!layer || layer.locked) { app.toast('Layer is locked'); return null; }
   const sel = app.selection;
-  const layerBefore = cloneCanvas(layer.canvas);
-  let rect = sel.active ? sel.bounds : { x: 0, y: 0, w: app.doc.width, h: app.doc.height };
+  const layerBeforeData = layer.ctx.getImageData(0, 0, layer.canvas.width, layer.canvas.height);
+  const rect = sel.active ? sel.bounds : { x: 0, y: 0, w: app.doc.width, h: app.doc.height };
   if (!rect || rect.w <= 0) return null;
 
+  const selectionBefore = sel.snapshot();
+  const docDirtyBefore = app.doc.dirty;
+  const selectionCanvas = selectionBefore
+    ? maskCanvasForRect(selectionBefore, app.doc.width, rect)
+    : null;
   const source = makeCanvas(rect.w, rect.h);
   const g = ctx2d(source);
   g.drawImage(layer.canvas, -rect.x, -rect.y);
-  if (sel.active) {
-    const maskCanvas = sel.toCanvas();
-    g.globalCompositeOperation = 'destination-in';
-    g.drawImage(maskCanvas, -rect.x, -rect.y);
-    g.globalCompositeOperation = 'source-over';
-  }
 
   if (cut) {
     const lg = layer.ctx;
     lg.save();
-    if (sel.active) {
+    if (selectionCanvas) {
+      // Partition the original into its unselected and selected fractions.
+      // Commit adds those premultiplied fractions, which reconstructs identity
+      // exactly even where the selection mask is soft.
+      g.globalCompositeOperation = 'destination-in';
+      g.drawImage(selectionCanvas, 0, 0);
+      g.globalCompositeOperation = 'source-over';
       lg.globalCompositeOperation = 'destination-out';
-      lg.drawImage(sel.toCanvas(), 0, 0);
+      lg.drawImage(selectionCanvas, rect.x, rect.y);
     } else {
       lg.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
     }
@@ -94,47 +118,129 @@ export function beginSession(app, { cut = true } = {}) {
 
   const session = new TransformSession(app, {
     source, rect, layer, lifted: cut,
-    selectionBefore: sel.snapshot(),
-    layerBefore,
+    selectionBefore,
+    layerBeforeData,
+    docDirtyBefore,
   });
   app.floating = session;
   bus.emit('layers');
   return session;
 }
 
-export function commitSession(app, label = 'Transform') {
-  const s = app.floating;
-  if (!s) return;
-  app.floating = null;
-  const layer = s.layer;
-  s.drawInto(layer.ctx);
-  app.doc.touch();
+function isIdentityTransform(s) {
+  const fullTurns = s.angle / (Math.PI * 2);
+  return !s.flipX && !s.flipY &&
+    s.x === s.sourceX && s.y === s.sourceY &&
+    s.w === s.source.width && s.h === s.source.height &&
+    Math.abs(fullTurns - Math.round(fullTurns)) < 1e-12;
+}
 
-  // Selection follows the transformed pixels when a selection was lifted.
-  const selBefore = s.selectionBefore;
-  let selAfter = selBefore;
-  if (selBefore) {
-    const m = makeCanvas(app.doc.width, app.doc.height);
-    const mg = ctx2d(m);
-    mg.save();
-    mg.imageSmoothingEnabled = false;
-    s.applyTo(mg);
-    mg.drawImage(s.source, -s.w / 2, -s.h / 2, s.w, s.h);
-    mg.restore();
-    const d = mg.getImageData(0, 0, app.doc.width, app.doc.height).data;
-    const mask = new Uint8Array(app.doc.width * app.doc.height);
-    for (let i = 0; i < mask.length; i++) mask[i] = d[i * 4 + 3];
-    selAfter = mask;
-    app.selection.restore(mask);
+/** Build the exact committed transform result without changing live state. */
+export function stageSession(app, s = app.floating) {
+  if (!s || s !== app.floating) return null;
+  const canvas = makeCanvas(app.doc.width, app.doc.height);
+  const g = ctx2d(canvas, { willReadFrequently: true });
+  const identity = s.lifted && isIdentityTransform(s);
+
+  if (identity) {
+    g.putImageData(s.layerBeforeData, 0, 0);
+  } else {
+    g.drawImage(s.layer.canvas, 0, 0);
+    if (s.lifted && s.selectionBefore) {
+      g.save();
+      g.setTransform(1, 0, 0, 1, 0, 0);
+      g.putImageData(s.layerBeforeData, 0, 0);
+      const sourceMask = maskCanvasForRect(s.selectionBefore, app.doc.width, {
+        x: s.sourceX, y: s.sourceY, w: s.source.width, h: s.source.height,
+      });
+      g.globalCompositeOperation = 'destination-out';
+      g.drawImage(sourceMask, s.sourceX, s.sourceY);
+      g.globalCompositeOperation = 'source-over';
+      s.drawInto(g);
+      g.restore();
+    } else {
+      s.drawInto(g);
+    }
   }
 
-  const entry = layerEntry(app.doc, layer, s.layerBefore, label);
+  // Selection follows the same affine transform independently of artwork
+  // alpha, so selected transparent pixels remain selected.
+  const selBefore = s.selectionBefore;
+  let selAfter = selBefore ? selBefore.slice() : null;
+  if (!identity && selBefore) {
+    const sourceMask = maskCanvasForRect(selBefore, app.doc.width, {
+      x: s.sourceX, y: s.sourceY, w: s.source.width, h: s.source.height,
+    });
+    const corners = s.corners();
+    const x0 = Math.max(0, Math.floor(Math.min(...corners.map((p) => p.x))));
+    const y0 = Math.max(0, Math.floor(Math.min(...corners.map((p) => p.y))));
+    const x1 = Math.min(app.doc.width, Math.ceil(Math.max(...corners.map((p) => p.x))));
+    const y1 = Math.min(app.doc.height, Math.ceil(Math.max(...corners.map((p) => p.y))));
+    const mask = new Uint8Array(app.doc.width * app.doc.height);
+
+    if (x1 > x0 && y1 > y0) {
+      const destinationMask = makeCanvas(x1 - x0, y1 - y0);
+      const mg = ctx2d(destinationMask, { willReadFrequently: true });
+      mg.save();
+      mg.imageSmoothingEnabled = false;
+      mg.translate(-x0, -y0);
+      s.applyTo(mg);
+      mg.drawImage(sourceMask, -s.w / 2, -s.h / 2, s.w, s.h);
+      mg.restore();
+      const data = mg.getImageData(0, 0, x1 - x0, y1 - y0).data;
+      const rowWidth = x1 - x0;
+      for (let y = 0; y < y1 - y0; y++) {
+        let src = y * rowWidth * 4 + 3;
+        let dst = (y0 + y) * app.doc.width + x0;
+        for (let x = 0; x < rowWidth; x++, src += 4, dst++) mask[dst] = data[src];
+      }
+    }
+    selAfter = mask;
+  }
+  const afterData = g.getImageData(0, 0, canvas.width, canvas.height);
+  return { session: s, identity, canvas, afterData, selection: selAfter };
+}
+
+export function commitSession(app, label = 'Transform', staged = null) {
+  const s = app.floating;
+  if (!s) return false;
+  let result;
+  try {
+    result = staged?.session === s ? staged : stageSession(app, s);
+  } catch {
+    return false;
+  }
+  if (!result) return false;
+
+  app.floating = null;
+  const layer = s.layer;
+  layer.ctx.putImageData(result.afterData, 0, 0);
+  if (result.identity) {
+    // This is not an edit: preserve saved/dirty identity and history exactly.
+    app.doc.dirty = s.docDirtyBefore;
+    app.selection.restore(s.selectionBefore);
+    bus.emit('layers');
+    return true;
+  }
+
+  app.doc.touch();
+  const selBefore = s.selectionBefore;
+  const selAfter = result.selection;
+  app.selection.restore(selAfter);
+  const apply = (data, selection) => {
+    layer.ctx.putImageData(data, 0, 0);
+    app.selection.restore(selection);
+    app.doc.touch();
+    bus.emit('layers');
+    return true;
+  };
   app.history.push({
     label,
-    undo: () => { entry.undo(); app.selection.restore(selBefore); },
-    redo: () => { entry.redo(); app.selection.restore(selAfter); },
+    undo: () => apply(s.layerBeforeData, selBefore),
+    redo: () => apply(result.afterData, selAfter),
   });
   bus.emit('layers');
+  return true;
 }
 
 export function cancelSession(app) {
@@ -142,11 +248,8 @@ export function cancelSession(app) {
   if (!s) return;
   app.floating = null;
   if (s.lifted) {
-    const lg = s.layer.ctx;
-    lg.setTransform(1, 0, 0, 1, 0, 0);
-    lg.clearRect(0, 0, s.layer.canvas.width, s.layer.canvas.height);
-    lg.drawImage(s.layerBefore, 0, 0);
-    app.doc.touch();
+    s.layer.ctx.putImageData(s.layerBeforeData, 0, 0);
+    app.doc.dirty = s.docDirtyBefore;
   }
   app.selection.restore(s.selectionBefore);
   bus.emit('layers');
@@ -169,9 +272,21 @@ export class MoveTool extends Tool {
 
   get session() { return this.app.floating; }
 
+  clearInteraction() {
+    this.mode = null;
+    this.handle = null;
+    this.startBox = null;
+    this.startAngle = null;
+    this.grab = null;
+    this.autoCommit = false;
+  }
+
   deactivate() {
     if (this.session) commitSession(this.app, 'Move');
+    this.clearInteraction();
   }
+
+  resetInteraction() { this.clearInteraction(); }
 
   handleAt(sx, sy) {
     const s = this.session;

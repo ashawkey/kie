@@ -1,0 +1,341 @@
+// Command registry: single source of truth for menus + keyboard shortcuts.
+import { bus } from '../core/bus.js';
+import { Doc } from '../core/doc.js';
+import { el, pickFile, rgbaCss, makeCanvas, ctx2d } from '../core/util.js';
+import { dialog, toast } from './modal.js';
+import { showHelp } from './help.js';
+import { t } from '../core/i18n.js';
+import { filters, applyFilter } from '../ops/filters.js';
+import {
+  resizeImage, resizeCanvasTo, flipDoc, rotateDoc, transformLayer,
+  addLayer, duplicateLayer, deleteLayer, moveLayer, mergeDown, flattenImage,
+  clearSelection, fillSelection,
+} from '../ops/image.js';
+import {
+  openImageAsDocument, importImageAsLayer, exportImage, openWithPicker,
+  saveProject, loadProject, copySelection, pasteClipboard, pasteFromSystem,
+} from '../ops/io.js';
+import { showExportDialog, saveDocument } from './export.js';
+import { beginSession, commitSession } from '../tools/transform.js';
+
+// Shortcut label pieces; separators differ between macOS and other platforms.
+const IS_MAC = navigator.platform.toLowerCase().includes('mac');
+const MOD = IS_MAC ? '⌘' : 'Ctrl+';
+const SHIFT = IS_MAC ? '⇧' : 'Shift+';
+const ALT = IS_MAC ? '⌥' : 'Alt+';
+
+export function registerCommands(app) {
+  const c = new Map();
+  const add = (id, def) => c.set(id, { id, ...def });
+
+  /* ---------------- File ---------------- */
+
+  add('file.new', {
+    label: 'New…', key: `${MOD}N`, icon: 'plus',
+    run: async () => {
+      const presets = [
+        ['16 × 16', 16, 16], ['32 × 32', 32, 32], ['64 × 64', 64, 64],
+        ['128 × 128', 128, 128], ['256 × 256', 256, 256], ['512 × 512', 512, 512],
+      ];
+      const grid = el('div', { class: 'preset-grid' });
+      let api = null;
+      const r = await dialog({
+        title: t('New Image'),
+        subtitle: t('Pick a preset or enter a custom size.'),
+        body: grid,
+        fields: [
+          { key: 'width', type: 'number', label: t('Width'), default: 64, min: 1, max: 8192 },
+          { key: 'height', type: 'number', label: t('Height'), default: 64, min: 1, max: 8192 },
+          {
+            key: 'background', type: 'select', label: t('Background'), default: 'transparent',
+            choices: [['transparent', t('Transparent')], ['white', t('White')], ['black', t('Black')], ['primary', t('Primary color')]],
+          },
+        ],
+        confirm: t('Create'),
+        onChange: (_v, a) => { api = a; },
+      });
+      // preset buttons fill the inputs live
+      for (const [label, w, h] of presets) {
+        grid.appendChild(el('button', {
+          class: 'gbtn',
+          onclick: () => {
+            api.inputs.width.value = w; api.values.width = w;
+            api.inputs.height.value = h; api.values.height = h;
+          },
+        }, [el('span', { text: label }), el('small', { text: `${w}×${h} px` })]));
+      }
+      if (!r) return;
+      const fill = r.background === 'white' ? '#ffffff'
+        : r.background === 'black' ? '#000000'
+        : r.background === 'primary' ? rgbaCss(app.color.primary) : null;
+      app.setDoc(Doc.blank(Math.round(r.width), Math.round(r.height), fill), 'untitled');
+    },
+  });
+
+  add('file.open', {
+    label: 'Open Image…', key: `${MOD}O`,
+    run: async () => {
+      // Prefer the picker that yields a writable handle, so Save works later.
+      try {
+        if (await openWithPicker(app)) return;
+      } catch (e) {
+        if (e?.name === 'AbortError') return;
+      }
+      const f = await pickFile('image/*');
+      if (f) await openImageAsDocument(app, f);
+    },
+  });
+
+  add('file.import', {
+    label: 'Import as Layer…',
+    run: async () => {
+      const f = await pickFile('image/*');
+      if (f) await importImageAsLayer(app, f);
+    },
+  });
+
+  add('file.save', {
+    label: (a) => (a.fileHandle ? `${t('Save')} ${a.docName}` : 'Save…'), title: 'Save',
+    key: `${MOD}S`, icon: 'save',
+    run: () => saveDocument(app),
+  });
+
+  add('file.export', {
+    label: 'Export / Save As…', key: `${MOD}${SHIFT}S`, icon: 'export',
+    run: () => showExportDialog(app),
+  });
+
+  add('file.export.png', {
+    label: 'Quick Export PNG',
+    run: async () => { await exportImage(app, { format: 'png' }); toast(t('Exported PNG')); },
+  });
+
+  add('file.project.save', { label: 'Save Project (.glassx)', run: () => { saveProject(app); toast(t('Project saved')); } });
+  add('file.project.open', {
+    label: 'Open Project…',
+    run: async () => {
+      const f = await pickFile('.glassx,application/json');
+      if (!f) return;
+      try { await loadProject(app, f); } catch (e) { toast(t('Could not open project')); }
+    },
+  });
+
+  /* ---------------- Edit ---------------- */
+
+  add('edit.undo', {
+    label: (a) => (a.history.canUndo() ? `${t('Undo')} ${t(a.history.past.at(-1).label)}` : 'Undo'), title: 'Undo',
+    key: `${MOD}Z`, icon: 'undo',
+    enabled: (a) => a.history.canUndo(),
+    run: () => { app.cancelFloating(); app.history.undo(); },
+  });
+
+  add('edit.redo', {
+    label: (a) => (a.history.canRedo() ? `${t('Redo')} ${t(a.history.future.at(-1).label)}` : 'Redo'), title: 'Redo',
+    key: `${MOD}${SHIFT}Z`, icon: 'redo',
+    enabled: (a) => a.history.canRedo(),
+    run: () => { app.cancelFloating(); app.history.redo(); },
+  });
+
+  add('edit.copy', { label: 'Copy', key: `${MOD}C`, icon: 'copy', run: () => { copySelection(app); toast(t('Copied')); } });
+  add('edit.cut', {
+    label: 'Cut', key: `${MOD}X`,
+    run: () => { copySelection(app); clearSelection(app); toast(t('Cut')); },
+  });
+  add('edit.paste', { label: 'Paste', key: `${MOD}V`, run: async () => { if (!(await pasteFromSystem(app))) pasteClipboard(app); } });
+  add('edit.clear', { label: 'Clear', key: 'Del', icon: 'trash', run: () => clearSelection(app) });
+  add('edit.fillPrimary', { label: 'Fill with Primary', key: `${ALT}Del`, run: () => fillSelection(app, rgbaCss(app.color.primary)) });
+  add('edit.fillSecondary', { label: 'Fill with Secondary', run: () => fillSelection(app, rgbaCss(app.color.secondary)) });
+
+  add('edit.transform', {
+    label: 'Free Transform', key: `${MOD}T`, icon: 'move',
+    run: () => {
+      if (app.floating) { commitSession(app, 'Transform'); return; }
+      const s = beginSession(app, { cut: true });
+      if (s) {
+        s.showHandles = true;
+        app.tools.select('move');
+        toast(t('Drag handles · Enter to apply · Esc to cancel'));
+      }
+    },
+  });
+
+  /* ---------------- Image ---------------- */
+
+  add('image.size', {
+    label: 'Image Size…', key: `${MOD}${ALT}I`,
+    run: async () => {
+      const doc = app.doc;
+      const r = await dialog({
+        title: t('Image Size'),
+        subtitle: `Currently ${doc.width} × ${doc.height} px.`,
+        fields: [
+          { key: 'width', type: 'number', label: t('Width'), default: doc.width, min: 1, max: 8192 },
+          { key: 'height', type: 'number', label: t('Height'), default: doc.height, min: 1, max: 8192 },
+          { key: 'smooth', type: 'toggle', label: t('Smooth (off = pixel art)'), default: false },
+        ],
+        confirm: t('Resize'),
+      });
+      if (!r) return;
+      resizeImage(app, Math.round(r.width), Math.round(r.height), r.smooth);
+      app.view.fit(app.doc.width, app.doc.height);
+    },
+  });
+
+  add('image.canvasSize', {
+    label: 'Canvas Size…', key: `${MOD}${ALT}C`,
+    run: async () => {
+      const doc = app.doc;
+      const r = await dialog({
+        title: t('Canvas Size'),
+        subtitle: t('Grows or crops the canvas without scaling pixels.'),
+        fields: [
+          { key: 'width', type: 'number', label: t('Width'), default: doc.width, min: 1, max: 8192 },
+          { key: 'height', type: 'number', label: t('Height'), default: doc.height, min: 1, max: 8192 },
+          {
+            key: 'anchor', type: 'select', label: t('Anchor'), default: 'center',
+            choices: [['top-left', t('Top left')], ['top', t('Top')], ['top-right', t('Top right')],
+              ['left', t('Left')], ['center', t('Center')], ['right', t('Right')],
+              ['bottom-left', t('Bottom left')], ['bottom', t('Bottom')], ['bottom-right', t('Bottom right')]],
+          },
+        ],
+        confirm: t('Apply'),
+      });
+      if (!r) return;
+      const w = Math.round(r.width), h = Math.round(r.height);
+      const ax = r.anchor.includes('left') ? 0 : r.anchor.includes('right') ? 1 : 0.5;
+      const ay = r.anchor.includes('top') ? 0 : r.anchor.includes('bottom') ? 1 : 0.5;
+      resizeCanvasTo(app, w, h, Math.round((w - doc.width) * ax), Math.round((h - doc.height) * ay));
+      app.view.fit(app.doc.width, app.doc.height);
+    },
+  });
+
+  add('image.trim', {
+    label: 'Trim Transparent Edges',
+    run: () => {
+      const doc = app.doc;
+      const flat = doc.flatten();
+      const d = flat.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, doc.width, doc.height).data;
+      let x0 = doc.width, y0 = doc.height, x1 = -1, y1 = -1;
+      for (let y = 0; y < doc.height; y++) {
+        for (let x = 0; x < doc.width; x++) {
+          if (d[(y * doc.width + x) * 4 + 3] > 0) {
+            if (x < x0) x0 = x; if (y < y0) y0 = y;
+            if (x > x1) x1 = x; if (y > y1) y1 = y;
+          }
+        }
+      }
+      if (x1 < 0) { toast(t('Nothing to trim')); return; }
+      if (x0 === 0 && y0 === 0 && x1 === doc.width - 1 && y1 === doc.height - 1) { toast(t('Already trimmed')); return; }
+      resizeCanvasTo(app, x1 - x0 + 1, y1 - y0 + 1, -x0, -y0, 'Trim');
+      app.view.fit(app.doc.width, app.doc.height);
+    },
+  });
+
+  add('image.flipH', { label: 'Flip Horizontal', run: () => flipDoc(app, 'x') });
+  add('image.flipV', { label: 'Flip Vertical', run: () => flipDoc(app, 'y') });
+  add('image.rotate90', { label: 'Rotate 90° CW', run: () => { rotateDoc(app, 90); app.view.fit(app.doc.width, app.doc.height); } });
+  add('image.rotate270', { label: 'Rotate 90° CCW', run: () => { rotateDoc(app, 270); app.view.fit(app.doc.width, app.doc.height); } });
+  add('image.rotate180', { label: 'Rotate 180°', run: () => rotateDoc(app, 180) });
+  add('image.flatten', { label: 'Flatten Image', icon: 'merge', run: () => flattenImage(app) });
+
+  /* ---------------- Layer ---------------- */
+
+  add('layer.new', { label: 'New Layer', key: `${MOD}${SHIFT}N`, icon: 'plus', run: () => addLayer(app) });
+  add('layer.duplicate', { label: 'Duplicate Layer', key: `${MOD}J`, icon: 'copy', run: () => duplicateLayer(app) });
+  add('layer.delete', { label: 'Delete Layer', icon: 'trash', run: () => deleteLayer(app) });
+  add('layer.raise', { label: 'Raise Layer', key: `${MOD}]`, icon: 'up', run: () => moveLayer(app, 1) });
+  add('layer.lower', { label: 'Lower Layer', key: `${MOD}[`, icon: 'down', run: () => moveLayer(app, -1) });
+  add('layer.mergeDown', { label: 'Merge Down', key: `${MOD}E`, icon: 'merge', run: () => mergeDown(app) });
+  add('layer.flipH', { label: 'Flip Layer Horizontal', run: () => transformLayer(app, 'flipX') });
+  add('layer.flipV', { label: 'Flip Layer Vertical', run: () => transformLayer(app, 'flipY') });
+  add('layer.rotate90', { label: 'Rotate Layer 90° CW', run: () => transformLayer(app, 'rot90') });
+  add('layer.rotate270', { label: 'Rotate Layer 90° CCW', run: () => transformLayer(app, 'rot270') });
+
+  /* ---------------- Select ---------------- */
+
+  const selectionEdit = (label, fn) => {
+    const before = app.selection.snapshot();
+    fn();
+    const after = app.selection.snapshot();
+    app.history.push({
+      label,
+      undo: () => app.selection.restore(before),
+      redo: () => app.selection.restore(after),
+    });
+  };
+
+  add('select.all', { label: 'Select All', key: `${MOD}A`, run: () => selectionEdit('Select All', () => app.selection.selectAll()) });
+  add('select.none', { label: 'Deselect', key: `${MOD}D`, run: () => selectionEdit('Deselect', () => app.selection.clear()) });
+  add('select.invert', { label: 'Invert Selection', key: `${MOD}${SHIFT}I`, run: () => selectionEdit('Invert Selection', () => app.selection.invert()) });
+  add('select.fromLayer', {
+    label: 'Selection from Layer Alpha',
+    run: () => {
+      const layer = app.doc.active;
+      if (!layer) return;
+      const d = layer.ctx.getImageData(0, 0, app.doc.width, app.doc.height).data;
+      const mask = new Uint8Array(app.doc.width * app.doc.height);
+      for (let i = 0; i < mask.length; i++) mask[i] = d[i * 4 + 3];
+      selectionEdit('Selection from Layer', () => app.selection.set(mask));
+    },
+  });
+
+  /* ---------------- Filters ---------------- */
+
+  for (const [key, f] of Object.entries(filters)) {
+    add(`filter.${key}`, {
+      // History keeps the English label as its key; only display is localised.
+      label: () => (f.params ? `${t(f.label)}…` : t(f.label)),
+      title: f.label,
+      icon: 'sliders',
+      run: async () => {
+        if (!f.params) { applyFilter(app, f.label, f.run); return; }
+        const preview = el('img', { id: 'filter-preview', class: 'checker' });
+        const src = previewSource(app);
+        const values = await dialog({
+          title: t(f.label),
+          fields: f.params.map((p) => ({ ...p, label: t(p.label), type: 'range' })),
+          body: preview,
+          confirm: t('Apply'),
+          onChange: (v) => { preview.src = renderPreview(src, f, v); },
+        });
+        if (!values) return;
+        applyFilter(app, f.label, f.run, values);
+      },
+    });
+  }
+
+  /* ---------------- View ---------------- */
+
+  add('view.zoomIn', { label: 'Zoom In', key: `${MOD}+`, run: () => app.view.zoomStep(1) });
+  add('view.zoomOut', { label: 'Zoom Out', key: `${MOD}-`, run: () => app.view.zoomStep(-1) });
+  add('view.zoom100', { label: 'Actual Size', key: `${MOD}1`, run: () => app.view.setScale(1) });
+  add('view.fit', { label: 'Fit on Screen', key: `${MOD}0`, icon: 'fit', run: () => app.view.fit(app.doc.width, app.doc.height) });
+  add('view.grid', {
+    label: (a) => (a.options.grid ? 'Hide Pixel Grid' : 'Show Pixel Grid'), title: 'Toggle Pixel Grid',
+    key: `${MOD}'`, icon: 'grid',
+    run: () => { app.options.grid = !app.options.grid; bus.emit('tool'); bus.emit('view'); },
+  });
+  add('view.help', { label: 'Help & Keyboard Shortcuts', key: '?', icon: 'help', run: () => showHelp(app) });
+
+  return c;
+}
+
+/** Downscaled source used for fast live filter previews. */
+function previewSource(app) {
+  const doc = app.doc;
+  const max = 320;
+  const s = Math.min(1, max / Math.max(doc.width, doc.height));
+  const w = Math.max(1, Math.round(doc.width * s)), h = Math.max(1, Math.round(doc.height * s));
+  const c = makeCanvas(w, h);
+  const g = ctx2d(c, { willReadFrequently: true });
+  g.imageSmoothingEnabled = s < 1;
+  g.drawImage(app.doc.active?.canvas || doc.flatten(), 0, 0, w, h);
+  return { canvas: c, ctx: g, data: g.getImageData(0, 0, w, h), w, h };
+}
+
+function renderPreview(src, f, params) {
+  const img = new ImageData(new Uint8ClampedArray(src.data.data), src.w, src.h);
+  f.run(img, src.w, src.h, params, new Uint8ClampedArray(src.data.data));
+  src.ctx.putImageData(img, 0, 0);
+  return src.canvas.toDataURL();
+}

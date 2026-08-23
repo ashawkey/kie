@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="kie">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5ac8fa"/>
+      <stop offset="1" stop-color="#a78bfa"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0.5" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity=".45"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#dbe6f5"/>
+    </linearGradient>
+  </defs>
+
+  <!-- glass tile -->
+  <rect width="64" height="64" rx="17" fill="url(#tile)"/>
+  <rect width="64" height="64" rx="17" fill="url(#sheen)"/>
+  <rect x=".75" y=".75" width="62.5" height="62.5" rx="16.25" fill="none"
+        stroke="#fff" stroke-opacity=".55" stroke-width="1.5"/>
+
+  <!-- pencil, drawn on the pixel grid it edits -->
+  <g transform="rotate(-45 32 32)">
+    <!-- body -->
+    <rect x="24" y="10" width="16" height="30" rx="2" fill="url(#body)"/>
+    <!-- ferrule -->
+    <rect x="24" y="40" width="16" height="5" fill="#8fa3bf"/>
+    <!-- tip -->
+    <path d="M24 45h16l-8 10z" fill="#f4c96b"/>
+    <!-- graphite -->
+    <path d="M28.6 51h6.8L32 55z" fill="#2b2f3a"/>
+    <!-- eraser -->
+    <path d="M26 4h12a2 2 0 012 2v4H24V6a2 2 0 012-2z" fill="#ff8fa8"/>
+    <!-- barrel shading -->
+    <rect x="34" y="10" width="6" height="30" fill="#000" opacity=".09"/>
+  </g>
+
+  <!-- pixels trailing the tip -->
+  <g fill="#fff">
+    <rect x="10" y="43" width="8" height="8" rx="1.5" opacity=".95"/>
+    <rect x="19" y="34" width="6" height="6" rx="1.2" opacity=".5"/>
+  </g>
+</svg>

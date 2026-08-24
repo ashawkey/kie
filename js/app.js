@@ -12,7 +12,7 @@ import { ColorState, buildColorPanel } from './ui/color.js';
 import { buildLayersPanel } from './ui/layers.js';
 import { buildToolRail, buildOptionsBar, buildHistoryPanel } from './ui/toolbar.js';
 import { buildMenuBar } from './ui/menu.js';
-import { registerCommands } from './ui/commands.js';
+import { COMMAND_TRANSACTION, registerCommands } from './ui/commands.js';
 import { installShortcuts } from './ui/shortcuts.js';
 import { installPointer } from './ui/pointer.js';
 import { icon } from './ui/icons.js';
@@ -279,17 +279,15 @@ class App {
     const cmd = this.commands.get(id);
     // Never settle a transaction for an unavailable/unrelated command.
     if (!cmd || !this.commandEnabled(id)) return false;
-    const undoRedo = id === 'edit.undo' || id === 'edit.redo';
-    if (undoRedo) {
+    const transaction = cmd.transaction || COMMAND_TRANSACTION.SETTLE;
+    if (transaction === COMMAND_TRANSACTION.HISTORY) {
       // Cancelling a preview is itself the requested navigation; do not also
       // traverse an older history entry in the same user action.
       if (this.settleHistoryNavigation()) return true;
       if (cmd.enabled && !cmd.enabled(this)) return false;
-    } else {
-      this.settlePendingEdit('commit');
+    } else if (transaction === COMMAND_TRANSACTION.SETTLE) {
+      this.prepareMutation();
       if (cmd.enabled && !cmd.enabled(this)) return false;
-      // A pending transform must be baked before most operations.
-      if (this.floating && id !== 'edit.transform') commitSession(this, 'Transform');
     }
     cmd.run(this);
     return true;
@@ -381,9 +379,9 @@ function boot() {
     setLocale(locale() === 'en' ? 'zh' : 'en');
   });
   $('#btn-export').addEventListener('click', () => app.run('file.export'));
-  $('#zoom-in').addEventListener('click', () => app.view.zoomStep(1));
-  $('#zoom-out').addEventListener('click', () => app.view.zoomStep(-1));
-  $('#zoom-value').addEventListener('click', () => app.view.setScale(1));
+  $('#zoom-in').addEventListener('click', () => app.run('view.zoomIn'));
+  $('#zoom-out').addEventListener('click', () => app.run('view.zoomOut'));
+  $('#zoom-value').addEventListener('click', () => app.run('view.zoom100'));
 
   const syncButtons = () => {
     $('#btn-undo').disabled = !app.commandEnabled('edit.undo');

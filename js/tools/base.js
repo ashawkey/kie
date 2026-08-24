@@ -44,6 +44,11 @@ export class PixelTool extends Tool {
       this.app.toast(layer?.locked ? 'Layer is locked' : 'Layer is hidden');
       return null;
     }
+    // An allocated zero-coverage mask is an active empty selection. Bail out
+    // before checking out or copying the full layer, constructing Painter, or
+    // taking pending-edit ownership; this gesture cannot change any pixel.
+    const selection = this.app.selection;
+    if (selection?.active && !selection.bounds) return null;
     const { width: w, height: h } = layer.canvas;
     const image = layer.ctx.getImageData(0, 0, w, h);
     this.before = new ImageData(new Uint8ClampedArray(image.data), w, h);

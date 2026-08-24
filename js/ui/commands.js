@@ -7,7 +7,7 @@ import { showHelp } from './help.js';
 import { t } from '../core/i18n.js';
 import { filters, applyFilter } from '../ops/filters.js';
 import {
-  resizeImage, resizeCanvasTo, flipDoc, rotateDoc, transformLayer,
+  resizeImage, resizeCanvasTo, trimTransparentEdges, flipDoc, rotateDoc, transformLayer,
   addLayer, duplicateLayer, deleteLayer, moveLayer, mergeDown, flattenImage,
   clearSelection, fillSelection,
 } from '../ops/image.js';
@@ -24,9 +24,20 @@ const MOD = IS_MAC ? '⌘' : 'Ctrl+';
 const SHIFT = IS_MAC ? '⇧' : 'Shift+';
 const ALT = IS_MAC ? '⌥' : 'Alt+';
 
+export const COMMAND_TRANSACTION = Object.freeze({
+  SETTLE: 'settle',
+  MANAGED: 'managed',
+  HISTORY: 'history',
+  VIEW: 'view',
+});
+
 export function registerCommands(app) {
   const c = new Map();
-  const add = (id, def) => c.set(id, { id, ...def });
+  const add = (id, def) => c.set(id, {
+    id,
+    transaction: COMMAND_TRANSACTION.SETTLE,
+    ...def,
+  });
 
   /* ---------------- File ---------------- */
 
@@ -154,14 +165,14 @@ export function registerCommands(app) {
 
   add('edit.undo', {
     label: (a) => (a.history.canUndo() ? `${t('Undo')} ${t(a.history.past.at(-1).label)}` : 'Undo'), title: 'Undo',
-    key: `${MOD}Z`, icon: 'undo',
+    key: `${MOD}Z`, icon: 'undo', transaction: COMMAND_TRANSACTION.HISTORY,
     enabled: (a) => a.history.canUndo(),
     run: () => { app.cancelFloating(); app.history.undo(); },
   });
 
   add('edit.redo', {
     label: (a) => (a.history.canRedo() ? `${t('Redo')} ${t(a.history.future.at(-1).label)}` : 'Redo'), title: 'Redo',
-    key: `${MOD}${SHIFT}Z`, icon: 'redo',
+    key: `${MOD}${SHIFT}Z`, icon: 'redo', transaction: COMMAND_TRANSACTION.HISTORY,
     enabled: (a) => a.history.canRedo(),
     run: () => { app.cancelFloating(); app.history.redo(); },
   });
@@ -172,12 +183,22 @@ export function registerCommands(app) {
     run: () => { copySelection(app); clearSelection(app); toast(t('Cut')); },
   });
   add('edit.paste', { label: 'Paste', key: `${MOD}V`, run: () => pasteFromSystem(app) });
-  add('edit.clear', { label: 'Clear', key: 'Del', icon: 'trash', run: () => clearSelection(app) });
-  add('edit.fillPrimary', { label: 'Fill with Primary', key: `${ALT}Del`, run: () => fillSelection(app, rgbaCss(app.color.primary)) });
-  add('edit.fillSecondary', { label: 'Fill with Secondary', run: () => fillSelection(app, rgbaCss(app.color.secondary)) });
+  add('edit.clear', {
+    label: 'Clear', key: 'Del', icon: 'trash', transaction: COMMAND_TRANSACTION.MANAGED,
+    run: () => clearSelection(app),
+  });
+  add('edit.fillPrimary', {
+    label: 'Fill with Primary', key: `${ALT}Del`, transaction: COMMAND_TRANSACTION.MANAGED,
+    run: () => fillSelection(app, rgbaCss(app.color.primary)),
+  });
+  add('edit.fillSecondary', {
+    label: 'Fill with Secondary', transaction: COMMAND_TRANSACTION.MANAGED,
+    run: () => fillSelection(app, rgbaCss(app.color.secondary)),
+  });
 
   add('edit.transform', {
     label: 'Free Transform', key: `${MOD}T`, icon: 'move',
+    transaction: COMMAND_TRANSACTION.MANAGED,
     run: () => {
       if (app.floating) { commitSession(app, 'Transform'); return; }
       const s = beginSession(app, { cut: true });
@@ -192,9 +213,9 @@ export function registerCommands(app) {
   /* ---------------- Image ---------------- */
 
   add('image.size', {
-    label: 'Image Size…', key: `${MOD}${ALT}I`,
+    label: 'Image Size…', key: `${MOD}${ALT}I`, transaction: COMMAND_TRANSACTION.MANAGED,
     run: async () => {
-      const token = app.prepareAsyncMutation();
+      const token = app.mutationToken();
       const doc = token.doc;
       const r = await dialog({
         title: t('Image Size'),
@@ -207,16 +228,15 @@ export function registerCommands(app) {
         confirm: t('Resize'),
       });
       if (!r || !app.isMutationTokenCurrent(token)) return;
-      app.prepareMutation();
       resizeImage(app, Math.round(r.width), Math.round(r.height), r.smooth);
       app.view.fit(app.doc.width, app.doc.height);
     },
   });
 
   add('image.canvasSize', {
-    label: 'Canvas Size…', key: `${MOD}${ALT}C`,
+    label: 'Canvas Size…', key: `${MOD}${ALT}C`, transaction: COMMAND_TRANSACTION.MANAGED,
     run: async () => {
-      const token = app.prepareAsyncMutation();
+      const token = app.mutationToken();
       const doc = token.doc;
       const r = await dialog({
         title: t('Canvas Size'),
@@ -234,7 +254,6 @@ export function registerCommands(app) {
         confirm: t('Apply'),
       });
       if (!r || !app.isMutationTokenCurrent(token)) return;
-      app.prepareMutation();
       const w = Math.round(r.width), h = Math.round(r.height);
       const ax = r.anchor.includes('left') ? 0 : r.anchor.includes('right') ? 1 : 0.5;
       const ay = r.anchor.includes('top') ? 0 : r.anchor.includes('bottom') ? 1 : 0.5;
@@ -244,32 +263,20 @@ export function registerCommands(app) {
   });
 
   add('image.trim', {
-    label: 'Trim Transparent Edges',
+    label: 'Trim Transparent Edges', transaction: COMMAND_TRANSACTION.MANAGED,
     run: () => {
-      const doc = app.doc;
-      const flat = doc.flatten();
-      const d = flat.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, doc.width, doc.height).data;
-      let x0 = doc.width, y0 = doc.height, x1 = -1, y1 = -1;
-      for (let y = 0; y < doc.height; y++) {
-        for (let x = 0; x < doc.width; x++) {
-          if (d[(y * doc.width + x) * 4 + 3] > 0) {
-            if (x < x0) x0 = x; if (y < y0) y0 = y;
-            if (x > x1) x1 = x; if (y > y1) y1 = y;
-          }
-        }
-      }
-      if (x1 < 0) { toast(t('Nothing to trim')); return; }
-      if (x0 === 0 && y0 === 0 && x1 === doc.width - 1 && y1 === doc.height - 1) { toast(t('Already trimmed')); return; }
-      resizeCanvasTo(app, x1 - x0 + 1, y1 - y0 + 1, -x0, -y0, 'Trim');
-      app.view.fit(app.doc.width, app.doc.height);
+      const result = trimTransparentEdges(app);
+      if (result === 'empty') toast(t('Nothing to trim'));
+      else if (result === 'unchanged') toast(t('Already trimmed'));
+      else if (result === 'success') app.view.fit(app.doc.width, app.doc.height);
     },
   });
 
-  add('image.flipH', { label: 'Flip Horizontal', run: () => flipDoc(app, 'x') });
-  add('image.flipV', { label: 'Flip Vertical', run: () => flipDoc(app, 'y') });
-  add('image.rotate90', { label: 'Rotate 90° CW', run: () => { rotateDoc(app, 90); app.view.fit(app.doc.width, app.doc.height); } });
-  add('image.rotate270', { label: 'Rotate 90° CCW', run: () => { rotateDoc(app, 270); app.view.fit(app.doc.width, app.doc.height); } });
-  add('image.rotate180', { label: 'Rotate 180°', run: () => rotateDoc(app, 180) });
+  add('image.flipH', { label: 'Flip Horizontal', transaction: COMMAND_TRANSACTION.MANAGED, run: () => flipDoc(app, 'x') });
+  add('image.flipV', { label: 'Flip Vertical', transaction: COMMAND_TRANSACTION.MANAGED, run: () => flipDoc(app, 'y') });
+  add('image.rotate90', { label: 'Rotate 90° CW', transaction: COMMAND_TRANSACTION.MANAGED, run: () => { if (rotateDoc(app, 90)) app.view.fit(app.doc.width, app.doc.height); } });
+  add('image.rotate270', { label: 'Rotate 90° CCW', transaction: COMMAND_TRANSACTION.MANAGED, run: () => { if (rotateDoc(app, 270)) app.view.fit(app.doc.width, app.doc.height); } });
+  add('image.rotate180', { label: 'Rotate 180°', transaction: COMMAND_TRANSACTION.MANAGED, run: () => rotateDoc(app, 180) });
   add('image.flatten', { label: 'Flatten Image', icon: 'merge', run: () => flattenImage(app) });
 
   /* ---------------- Layer ---------------- */
@@ -280,10 +287,10 @@ export function registerCommands(app) {
   add('layer.raise', { label: 'Raise Layer', key: `${MOD}]`, icon: 'up', run: () => moveLayer(app, 1) });
   add('layer.lower', { label: 'Lower Layer', key: `${MOD}[`, icon: 'down', run: () => moveLayer(app, -1) });
   add('layer.mergeDown', { label: 'Merge Down', key: `${MOD}E`, icon: 'merge', run: () => mergeDown(app) });
-  add('layer.flipH', { label: 'Flip Layer Horizontal', run: () => transformLayer(app, 'flipX') });
-  add('layer.flipV', { label: 'Flip Layer Vertical', run: () => transformLayer(app, 'flipY') });
-  add('layer.rotate90', { label: 'Rotate Layer 90° CW', run: () => transformLayer(app, 'rot90') });
-  add('layer.rotate270', { label: 'Rotate Layer 90° CCW', run: () => transformLayer(app, 'rot270') });
+  add('layer.flipH', { label: 'Flip Layer Horizontal', transaction: COMMAND_TRANSACTION.MANAGED, run: () => transformLayer(app, 'flipX') });
+  add('layer.flipV', { label: 'Flip Layer Vertical', transaction: COMMAND_TRANSACTION.MANAGED, run: () => transformLayer(app, 'flipY') });
+  add('layer.rotate90', { label: 'Rotate Layer 90° CW', transaction: COMMAND_TRANSACTION.MANAGED, run: () => transformLayer(app, 'rot90') });
+  add('layer.rotate270', { label: 'Rotate Layer 90° CCW', transaction: COMMAND_TRANSACTION.MANAGED, run: () => transformLayer(app, 'rot270') });
 
   /* ---------------- Select ---------------- */
 
@@ -343,16 +350,16 @@ export function registerCommands(app) {
 
   /* ---------------- View ---------------- */
 
-  add('view.zoomIn', { label: 'Zoom In', key: `${MOD}+`, run: () => app.view.zoomStep(1) });
-  add('view.zoomOut', { label: 'Zoom Out', key: `${MOD}-`, run: () => app.view.zoomStep(-1) });
-  add('view.zoom100', { label: 'Actual Size', key: `${MOD}1`, run: () => app.view.setScale(1) });
-  add('view.fit', { label: 'Fit on Screen', key: `${MOD}0`, icon: 'fit', run: () => app.view.fit(app.doc.width, app.doc.height) });
+  add('view.zoomIn', { label: 'Zoom In', key: `${MOD}+`, transaction: COMMAND_TRANSACTION.VIEW, run: () => app.view.zoomStep(1) });
+  add('view.zoomOut', { label: 'Zoom Out', key: `${MOD}-`, transaction: COMMAND_TRANSACTION.VIEW, run: () => app.view.zoomStep(-1) });
+  add('view.zoom100', { label: 'Actual Size', key: `${MOD}1`, transaction: COMMAND_TRANSACTION.VIEW, run: () => app.view.setScale(1) });
+  add('view.fit', { label: 'Fit on Screen', key: `${MOD}0`, icon: 'fit', transaction: COMMAND_TRANSACTION.VIEW, run: () => app.view.fit(app.doc.width, app.doc.height) });
   add('view.grid', {
     label: (a) => (a.options.grid ? 'Hide Pixel Grid' : 'Show Pixel Grid'), title: 'Toggle Pixel Grid',
-    key: `${MOD}'`, icon: 'grid',
+    key: `${MOD}'`, icon: 'grid', transaction: COMMAND_TRANSACTION.VIEW,
     run: () => { app.options.grid = !app.options.grid; bus.emit('tool'); bus.emit('view'); },
   });
-  add('view.help', { label: 'Help & Keyboard Shortcuts', key: '?', icon: 'help', run: () => showHelp(app) });
+  add('view.help', { label: 'Help & Keyboard Shortcuts', key: '?', icon: 'help', transaction: COMMAND_TRANSACTION.VIEW, run: () => showHelp(app) });
 
   return c;
 }

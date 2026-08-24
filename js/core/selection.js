@@ -62,7 +62,10 @@ export class Selection {
         }
       }
     }
-    if (x1 <= x0) { this.mask = null; this.bounds = null; return; }
+    // An allocated all-zero mask is an active empty selection. Do not collapse
+    // it to null: null is the distinct unrestricted/select-all state used by
+    // pixel operations.
+    if (x1 <= x0) { this.bounds = null; return; }
     this.bounds = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
   }
 
@@ -133,13 +136,14 @@ export class Selection {
 }
 
 export function combine(prev, next, mode, n) {
-  if (mode === 'replace' || !prev) {
-    if (mode === 'subtract' && !prev) {
-      const out = new Uint8Array(n);
-      for (let i = 0; i < n; i++) out[i] = 255 - next[i];
-      return out;
-    }
-    return next;
+  if (mode === 'replace') return next;
+  // null means unrestricted/all pixels, rather than an empty starting set.
+  if (!prev) {
+    if (mode === 'add') return null;
+    if (mode === 'intersect') return next;
+    const out = new Uint8Array(n); // all minus next
+    for (let i = 0; i < n; i++) out[i] = 255 - next[i];
+    return out;
   }
   const out = new Uint8Array(n);
   for (let i = 0; i < n; i++) {

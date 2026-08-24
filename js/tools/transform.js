@@ -6,9 +6,12 @@ import { makeCanvas, ctx2d } from '../core/util.js';
 
 /** A floating piece of pixels being moved/transformed. */
 export class TransformSession {
-  constructor(app, { source, rect, layer, lifted, selectionBefore, layerBeforeData, docDirtyBefore }) {
+  constructor(app, {
+    source, sourceMask, rect, layer, lifted, selectionBefore, layerBeforeData, docDirtyBefore,
+  }) {
     this.app = app;
     this.source = source;      // canvas holding the lifted pixels
+    this.sourceMask = sourceMask; // cached selection mask for live soft-selection previews
     this.layer = layer;
     this.lifted = lifted;      // true when pixels were cut out of the layer
     this.selectionBefore = selectionBefore;
@@ -83,10 +86,13 @@ export function beginSession(app, { cut = true } = {}) {
   const layer = app.doc.active;
   if (!layer || layer.locked) { app.toast('Layer is locked'); return null; }
   const sel = app.selection;
-  const layerBeforeData = layer.ctx.getImageData(0, 0, layer.canvas.width, layer.canvas.height);
   const rect = sel.active ? sel.bounds : { x: 0, y: 0, w: app.doc.width, h: app.doc.height };
-  if (!rect || rect.w <= 0) return null;
+  // An allocated zero-coverage mask is an active empty selection. Settle any
+  // prior pending edit above, but do not allocate a full-layer snapshot,
+  // selection canvas, floating canvas, or session for this no-op.
+  if (!rect || rect.w <= 0 || rect.h <= 0) return null;
 
+  const layerBeforeData = layer.ctx.getImageData(0, 0, layer.canvas.width, layer.canvas.height);
   const selectionBefore = sel.snapshot();
   const docDirtyBefore = app.doc.dirty;
   const selectionCanvas = selectionBefore
@@ -117,7 +123,7 @@ export function beginSession(app, { cut = true } = {}) {
   }
 
   const session = new TransformSession(app, {
-    source, rect, layer, lifted: cut,
+    source, sourceMask: selectionCanvas, rect, layer, lifted: cut,
     selectionBefore,
     layerBeforeData,
     docDirtyBefore,
@@ -135,6 +141,28 @@ function isIdentityTransform(s) {
     Math.abs(fullTurns - Math.round(fullTurns)) < 1e-12;
 }
 
+/** Draw the exact layer pixels represented by a live transform session. */
+export function drawSessionLayer(s, g, identity = s.lifted && isIdentityTransform(s)) {
+  if (identity) {
+    g.putImageData(s.layerBeforeData, 0, 0);
+    return;
+  }
+
+  g.drawImage(s.layer.canvas, 0, 0);
+  if (s.lifted && s.selectionBefore) {
+    g.save();
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.putImageData(s.layerBeforeData, 0, 0);
+    g.globalCompositeOperation = 'destination-out';
+    g.drawImage(s.sourceMask, s.sourceX, s.sourceY);
+    g.globalCompositeOperation = 'source-over';
+    s.drawInto(g);
+    g.restore();
+  } else {
+    s.drawInto(g);
+  }
+}
+
 /** Build the exact committed transform result without changing live state. */
 export function stageSession(app, s = app.floating) {
   if (!s || s !== app.floating) return null;
@@ -142,35 +170,14 @@ export function stageSession(app, s = app.floating) {
   const g = ctx2d(canvas, { willReadFrequently: true });
   const identity = s.lifted && isIdentityTransform(s);
 
-  if (identity) {
-    g.putImageData(s.layerBeforeData, 0, 0);
-  } else {
-    g.drawImage(s.layer.canvas, 0, 0);
-    if (s.lifted && s.selectionBefore) {
-      g.save();
-      g.setTransform(1, 0, 0, 1, 0, 0);
-      g.putImageData(s.layerBeforeData, 0, 0);
-      const sourceMask = maskCanvasForRect(s.selectionBefore, app.doc.width, {
-        x: s.sourceX, y: s.sourceY, w: s.source.width, h: s.source.height,
-      });
-      g.globalCompositeOperation = 'destination-out';
-      g.drawImage(sourceMask, s.sourceX, s.sourceY);
-      g.globalCompositeOperation = 'source-over';
-      s.drawInto(g);
-      g.restore();
-    } else {
-      s.drawInto(g);
-    }
-  }
+  drawSessionLayer(s, g, identity);
 
   // Selection follows the same affine transform independently of artwork
   // alpha, so selected transparent pixels remain selected.
   const selBefore = s.selectionBefore;
   let selAfter = selBefore ? selBefore.slice() : null;
   if (!identity && selBefore) {
-    const sourceMask = maskCanvasForRect(selBefore, app.doc.width, {
-      x: s.sourceX, y: s.sourceY, w: s.source.width, h: s.source.height,
-    });
+    const sourceMask = s.sourceMask;
     const corners = s.corners();
     const x0 = Math.max(0, Math.floor(Math.min(...corners.map((p) => p.x))));
     const y0 = Math.max(0, Math.floor(Math.min(...corners.map((p) => p.y))));

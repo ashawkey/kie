@@ -12,6 +12,45 @@ function snapshotDoc(doc) {
   };
 }
 
+/** Snapshot the exact pixels represented by a staged mutation. */
+function snapshotPreparedDoc(app, prepared) {
+  const snap = snapshotDoc(app.doc);
+  const pending = prepared.pending;
+  if (pending?.staged?.painter && pending.edit?.layer) {
+    const target = snap.layers.find(({ layer }) => layer === pending.edit.layer);
+    if (!target) throw new Error('Pending layer is no longer in the document');
+    const image = pending.staged.painter.image;
+    const ctx = ctx2d(target.canvas, { willReadFrequently: true });
+    ctx.putImageData(image, 0, 0);
+  }
+  if (prepared.floating) {
+    const target = snap.layers.find(({ layer }) => layer === prepared.floating.session.layer);
+    if (!target) throw new Error('Floating layer is no longer in the document');
+    target.canvas = cloneCanvas(prepared.floating.canvas);
+  }
+  return snap;
+}
+
+/** Prepare selection metadata without touching the live Selection object. */
+function buildSelectionState(width, height, source = null) {
+  let mask = source ? source.slice() : null;
+  let bounds = null;
+  if (mask) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (!mask[y * width + x]) continue;
+        if (x < x0) x0 = x;
+        if (y < y0) y0 = y;
+        if (x >= x1) x1 = x + 1;
+        if (y >= y1) y1 = y + 1;
+      }
+    }
+    if (x1 > x0) bounds = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
+  return { width, height, mask, bounds, outline: null };
+}
+
 /** Allocate and draw a complete replacement without touching live state. */
 function buildDocState(snap, selection = null) {
   const layers = snap.layers.map(({ layer, canvas: src }) => {
@@ -28,7 +67,7 @@ function buildDocState(snap, selection = null) {
     layers,
     composite,
     compositeCtx,
-    selection: selection ? selection.slice() : null,
+    selection: buildSelectionState(snap.width, snap.height, selection),
   };
 }
 
@@ -43,9 +82,11 @@ function applyDocState(app, state) {
   doc.height = state.height;
   doc.composite = state.composite;
   doc.compositeCtx = state.compositeCtx;
-  app.selection.resize(state.width, state.height);
-  app.selection.mask = state.selection;
-  app.selection._recompute();
+  app.selection.width = state.selection.width;
+  app.selection.height = state.selection.height;
+  app.selection.mask = state.selection.mask;
+  app.selection.bounds = state.selection.bounds;
+  app.selection._outline = state.selection.outline;
   doc.touch();
   bus.emit('doc');
   bus.emit('layers');
@@ -53,45 +94,9 @@ function applyDocState(app, state) {
   return true;
 }
 
-/** Restore bytes into the existing layer canvases so older history closures
- * keep targeting the live contexts after a document operation is undone. */
+/** Restore only after all target pixels and metadata are ready off-state. */
 function restoreDoc(app, snap, selection = null) {
-  const prepared = buildDocState(snap, selection);
-  const doc = app.doc;
-  const replacements = prepared.layers.map(({ layer, canvas }) => {
-    if (layer.canvas.width === snap.width && layer.canvas.height === snap.height) return null;
-    const replacement = makeCanvas(snap.width, snap.height);
-    return { layer, replacement, ctx: ctx2d(replacement, { willReadFrequently: true }), canvas };
-  });
-  for (const item of replacements) {
-    if (!item) continue;
-    item.ctx.drawImage(item.canvas, 0, 0);
-  }
-  for (const item of replacements) {
-    if (!item) continue;
-    item.layer.canvas = item.replacement;
-    item.layer.ctx = item.ctx;
-  }
-  for (const { layer, canvas } of prepared.layers) {
-    const replacement = replacements.find((item) => item?.layer === layer);
-    if (!replacement) {
-      layer.ctx.setTransform(1, 0, 0, 1, 0, 0);
-      layer.ctx.clearRect(0, 0, snap.width, snap.height);
-      layer.ctx.drawImage(canvas, 0, 0);
-    }
-  }
-  doc.width = snap.width;
-  doc.height = snap.height;
-  doc.composite = prepared.composite;
-  doc.compositeCtx = prepared.compositeCtx;
-  app.selection.resize(snap.width, snap.height);
-  app.selection.mask = prepared.selection;
-  app.selection._recompute();
-  doc.touch();
-  bus.emit('doc');
-  bus.emit('layers');
-  bus.emit('selection');
-  return true;
+  return applyDocState(app, buildDocState(snap, selection));
 }
 
 /** Generic "rebuild all layers" op with undo. */
@@ -106,13 +111,7 @@ export function docOp(app, label, w, h, drawLayer) {
     prepared = app.stageMutation();
     if (!prepared) throw new Error('Could not stage pending edit');
     selBefore = prepared.floating?.selection ?? app.selection.snapshot();
-    before = snapshotDoc(doc);
-    if (prepared.floating) {
-      const floatingLayer = before.layers.find(({ layer }) =>
-        layer === prepared.floating.session.layer);
-      if (!floatingLayer) throw new Error('Floating layer is no longer in the document');
-      floatingLayer.canvas = cloneCanvas(prepared.floating.canvas);
-    }
+    before = snapshotPreparedDoc(app, prepared);
 
     // Preflight the complete operation before settling a pending stroke,
     // opacity gesture, or floating transform. Failure therefore preserves the
@@ -133,32 +132,123 @@ export function docOp(app, label, w, h, drawLayer) {
       height: h,
       layers: layers.map(({ layer, canvas }) => ({ layer, canvas: cloneCanvas(canvas) })),
     };
-    next = { width: w, height: h, layers, composite, compositeCtx, selection: null };
+    next = {
+      width: w,
+      height: h,
+      layers,
+      composite,
+      compositeCtx,
+      selection: buildSelectionState(w, h),
+    };
   } catch {
     app.toast?.('Could not update document');
     return false;
   }
 
   // All fallible detached work has completed. Settle exactly the pending state
-  // that was staged, then apply one document operation.
-  if (!app.commitPreparedMutation(prepared)) {
+  // that was staged, then apply one document operation. Settlement itself may
+  // publish already-committed history/events, so observer failures are isolated
+  // by the event bus rather than escaping this commit boundary.
+  try {
+    if (!app.commitPreparedMutation(prepared)) {
+      app.toast?.('Could not update document');
+      return false;
+    }
+    // The detached source already includes staged pending/floating results, so
+    // it is also the correct undo state after settlement.
+    applyDocState(app, next);
+    app.history.push({
+      label,
+      undo: () => restoreDoc(app, before, selBefore),
+      redo: () => restoreDoc(app, after),
+    });
+    return true;
+  } catch {
     app.toast?.('Could not update document');
     return false;
   }
-  // Settlement is now complete and cannot invalidate detached construction.
-  // The detached source already includes staged pending/floating results, so
-  // it is also the correct undo state after settlement.
-  applyDocState(app, next);
-  app.history.push({
-    label,
-    undo: () => restoreDoc(app, before, selBefore),
-    redo: () => restoreDoc(app, after),
-  });
-  return true;
 }
 
 export function resizeCanvasTo(app, w, h, dx, dy, label = 'Canvas Size') {
   return docOp(app, label, w, h, (g, src) => g.drawImage(src, dx, dy));
+}
+
+/** Trim using one detached staged state for both bounds and committed pixels. */
+export function trimTransparentEdges(app) {
+  let prepared, before, selBefore, bounds, next, after;
+  try {
+    prepared = app.stageMutation();
+    if (!prepared) throw new Error('Could not stage pending edit');
+    before = snapshotPreparedDoc(app, prepared);
+    selBefore = prepared.floating?.selection ?? app.selection.snapshot();
+
+    const flat = makeCanvas(before.width, before.height);
+    const g = ctx2d(flat, { willReadFrequently: true });
+    for (const { layer, canvas } of before.layers) {
+      if (!layer.visible) continue;
+      const opacity = prepared.pending?.edit?.layer === layer &&
+        Number.isFinite(prepared.pending?.staged?.after)
+        ? prepared.pending.staged.after : layer.opacity;
+      if (opacity <= 0) continue;
+      g.globalAlpha = opacity;
+      g.globalCompositeOperation = layer.blend;
+      g.drawImage(canvas, 0, 0);
+    }
+    const data = g.getImageData(0, 0, before.width, before.height).data;
+    let x0 = before.width, y0 = before.height, x1 = -1, y1 = -1;
+    for (let y = 0; y < before.height; y++) {
+      for (let x = 0; x < before.width; x++) {
+        if (!data[(y * before.width + x) * 4 + 3]) continue;
+        if (x < x0) x0 = x;
+        if (y < y0) y0 = y;
+        if (x > x1) x1 = x;
+        if (y > y1) y1 = y;
+      }
+    }
+    if (x1 < 0) return 'empty';
+    if (x0 === 0 && y0 === 0 && x1 === before.width - 1 && y1 === before.height - 1) {
+      return 'unchanged';
+    }
+    bounds = { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+
+    const layers = before.layers.map(({ layer, canvas: src }) => {
+      const canvas = makeCanvas(bounds.w, bounds.h);
+      const ctx = ctx2d(canvas, { willReadFrequently: true });
+      ctx.drawImage(src, -bounds.x, -bounds.y);
+      return { layer, canvas, ctx };
+    });
+    after = {
+      width: bounds.w,
+      height: bounds.h,
+      layers: layers.map(({ layer, canvas }) => ({ layer, canvas: cloneCanvas(canvas) })),
+    };
+    next = {
+      width: bounds.w,
+      height: bounds.h,
+      layers,
+      composite: makeCanvas(bounds.w, bounds.h),
+      compositeCtx: null,
+      selection: buildSelectionState(bounds.w, bounds.h),
+    };
+    next.compositeCtx = ctx2d(next.composite);
+  } catch {
+    app.toast?.('Could not update document');
+    return 'failure';
+  }
+
+  try {
+    if (!app.commitPreparedMutation(prepared)) return 'failure';
+    applyDocState(app, next);
+    app.history.push({
+      label: 'Trim',
+      undo: () => restoreDoc(app, before, selBefore),
+      redo: () => restoreDoc(app, after),
+    });
+    return 'success';
+  } catch {
+    app.toast?.('Could not update document');
+    return 'failure';
+  }
 }
 
 export function resizeImage(app, w, h, smooth = false) {
@@ -191,54 +281,64 @@ export function rotateDoc(app, deg) {
 
 /** Flip / rotate only the active layer (or selection contents). */
 export function transformLayer(app, kind) {
-  app.prepareMutation();
-  const layer = app.doc.active;
-  if (!layer || layer.locked) return;
-  const before = cloneCanvas(layer.canvas);
-  const { width: w, height: h } = layer.canvas;
-  const sel = app.selection;
-  const region = sel.active ? sel.bounds : { x: 0, y: 0, w, h };
-  const src = makeCanvas(region.w, region.h);
-  const sg = ctx2d(src);
-  sg.drawImage(layer.canvas, -region.x, -region.y);
-  if (sel.active) {
-    sg.globalCompositeOperation = 'destination-in';
-    sg.drawImage(sel.toCanvas(), -region.x, -region.y);
-  }
+  // A live active empty selection cannot affect pixels. Bail out before staging
+  // or allocating snapshots; floating sessions use their staged selection.
+  if (!app.floating && app.selection.active && !app.selection.bounds) return false;
+  let prepared, layer, before, after, afterCtx, redo;
+  try {
+    prepared = app.stageMutation();
+    if (!prepared) throw new Error('Could not stage pending edit');
+    layer = app.doc.active;
+    if (!layer || layer.locked) return;
+    const { width: w, height: h } = layer.canvas;
+    before = cloneCanvas(layer.canvas);
+    if (prepared.floating?.session.layer === layer) {
+      before = cloneCanvas(prepared.floating.canvas);
+    }
+    const selMask = prepared.floating?.selection ?? app.selection.snapshot();
+    const selState = buildSelectionState(w, h, selMask);
+    // An active empty selection transforms no pixels and creates no history.
+    if (selState.mask && !selState.bounds) return false;
+    const region = selState.mask ? selState.bounds : { x: 0, y: 0, w, h };
+    const selectionCanvas = selState.mask ? selectionCanvasFromMask(w, h, selState.mask) : null;
+    const src = makeCanvas(region.w, region.h);
+    const sg = ctx2d(src);
+    sg.drawImage(before, -region.x, -region.y);
+    if (selectionCanvas) {
+      sg.globalCompositeOperation = 'destination-in';
+      sg.drawImage(selectionCanvas, -region.x, -region.y);
+    }
 
-  // Recompose from the immutable original. With a soft mask the selected and
-  // unselected premultiplied fractions are additive; source-over would apply
-  // coverage twice and attenuate an identity transform (50% became 75% alpha).
-  const result = sel.active ? cloneCanvas(before) : makeCanvas(w, h);
-  const g = ctx2d(result);
-  g.save();
-  if (sel.active) {
-    g.globalCompositeOperation = 'destination-out';
-    g.drawImage(sel.toCanvas(), 0, 0);
-    g.globalCompositeOperation = 'lighter';
+    // Recompose from the immutable original. With a soft mask the selected and
+    // unselected premultiplied fractions are additive; source-over would apply
+    // coverage twice and attenuate an identity transform (50% became 75% alpha).
+    after = selectionCanvas ? cloneCanvas(before) : makeCanvas(w, h);
+    const g = ctx2d(after, { willReadFrequently: true });
+    afterCtx = g;
+    g.save();
+    if (selectionCanvas) {
+      g.globalCompositeOperation = 'destination-out';
+      g.drawImage(selectionCanvas, 0, 0);
+      g.globalCompositeOperation = 'lighter';
+    }
+    g.translate(region.x + region.w / 2, region.y + region.h / 2);
+    if (kind === 'flipX') g.scale(-1, 1);
+    else if (kind === 'flipY') g.scale(1, -1);
+    else if (kind === 'rot90') g.rotate(Math.PI / 2);
+    else if (kind === 'rot270') g.rotate(-Math.PI / 2);
+    else if (kind === 'rot180') g.rotate(Math.PI);
+    g.imageSmoothingEnabled = false;
+    g.drawImage(src, -region.w / 2, -region.h / 2);
+    g.restore();
+    redo = cloneCanvas(after);
+  } catch {
+    app.toast?.('Could not transform layer');
+    return false;
   }
-  g.translate(region.x + region.w / 2, region.y + region.h / 2);
-  if (kind === 'flipX') g.scale(-1, 1);
-  else if (kind === 'flipY') g.scale(1, -1);
-  else if (kind === 'rot90') g.rotate(Math.PI / 2);
-  else if (kind === 'rot270') g.rotate(-Math.PI / 2);
-  else if (kind === 'rot180') g.rotate(Math.PI);
-  g.imageSmoothingEnabled = false;
-  g.drawImage(src, -region.w / 2, -region.h / 2);
-  g.restore();
-  layer.ctx.clearRect(0, 0, w, h);
-  layer.ctx.drawImage(result, 0, 0);
-
-  app.doc.touch();
-  bus.emit('layers');
-  const after = cloneCanvas(layer.canvas);
-  const apply = (c) => {
-    layer.ctx.clearRect(0, 0, w, h);
-    layer.ctx.drawImage(c, 0, 0);
-    app.doc.touch();
-    bus.emit('layers');
-  };
-  app.history.push({ label: 'Transform Layer', undo: () => apply(before), redo: () => apply(after) });
+  if (!app.commitPreparedMutation(prepared)) return false;
+  return commitDetachedLayerState(
+    app, layer, { canvas: after, ctx: afterCtx }, before, redo, 'Transform Layer',
+  );
 }
 
 /* ---------- layer operations ---------- */
@@ -415,60 +515,109 @@ export function setLayerProp(app, layer, key, value, label = 'Layer Property') {
 
 /* ---------- selection-content ops ---------- */
 
-export function clearSelection(app) {
-  app.prepareMutation();
-  const layer = app.doc.active;
-  if (!layer || layer.locked) return;
-  const before = cloneCanvas(layer.canvas);
-  const g = layer.ctx;
-  g.save();
-  if (app.selection.active) {
-    g.globalCompositeOperation = 'destination-out';
-    g.drawImage(app.selection.toCanvas(), 0, 0);
-  } else {
-    g.clearRect(0, 0, app.doc.width, app.doc.height);
+function selectionCanvasFromMask(w, h, mask) {
+  const canvas = makeCanvas(w, h);
+  const g = ctx2d(canvas);
+  const image = g.createImageData(w, h);
+  for (let i = 0; i < mask.length; i++) {
+    image.data[i * 4] = image.data[i * 4 + 1] = image.data[i * 4 + 2] = 255;
+    image.data[i * 4 + 3] = mask[i];
   }
-  g.restore();
+  g.putImageData(image, 0, 0);
+  return canvas;
+}
+
+function stageLayerCanvasMutation(app, draw) {
+  // Avoid even staging/allocating when the live selection is explicitly empty.
+  // A floating staged selection is handled below because it may differ.
+  if (!app.floating && app.selection.active && !app.selection.bounds) return null;
+  const prepared = app.stageMutation();
+  if (!prepared) throw new Error('Could not stage pending edit');
+  const layer = app.doc.active;
+  if (!layer || layer.locked) return null;
+  let before = cloneCanvas(layer.canvas);
+  if (prepared.floating?.session.layer === layer) {
+    before = cloneCanvas(prepared.floating.canvas);
+  }
+  const after = cloneCanvas(before);
+  const afterCtx = ctx2d(after, { willReadFrequently: true });
+  const selection = prepared.floating?.selection ?? app.selection.snapshot();
+  // Avoid replacing canvases and publishing a no-op history entry for an
+  // active empty selection.
+  if (selection && !selection.some((coverage) => coverage !== 0)) return null;
+  const selectionCanvas = selection
+    ? selectionCanvasFromMask(app.doc.width, app.doc.height, selection)
+    : null;
+  draw(afterCtx, selectionCanvas);
+  // Keep both history snapshots independent from the canvases used to stage
+  // or commit. All allocations and draws therefore finish before live pixels.
+  const undo = cloneCanvas(before);
+  const redo = cloneCanvas(after);
+  return { prepared, layer, state: { canvas: after, ctx: afterCtx }, undo, redo };
+}
+
+function restoreLayerCanvas(app, layer, snapshot) {
+  const canvas = cloneCanvas(snapshot);
+  const ctx = ctx2d(canvas, { willReadFrequently: true });
+  layer.canvas = canvas;
+  layer.ctx = ctx;
   app.doc.touch();
   bus.emit('layers');
-  const after = cloneCanvas(layer.canvas);
-  const apply = (c) => {
-    layer.ctx.clearRect(0, 0, app.doc.width, app.doc.height);
-    layer.ctx.drawImage(c, 0, 0);
-    app.doc.touch();
-    bus.emit('layers');
-  };
-  app.history.push({ label: 'Clear', undo: () => apply(before), redo: () => apply(after) });
+  return true;
+}
+
+function commitDetachedLayerState(app, layer, state, undo, redo, label) {
+  layer.canvas = state.canvas;
+  layer.ctx = state.ctx;
+  app.doc.touch();
+  bus.emit('layers');
+  app.history.push({
+    label,
+    undo: () => restoreLayerCanvas(app, layer, undo),
+    redo: () => restoreLayerCanvas(app, layer, redo),
+  });
+  return true;
+}
+
+function runLayerCanvasMutation(app, label, draw) {
+  let staged;
+  try {
+    staged = stageLayerCanvasMutation(app, draw);
+  } catch {
+    app.toast?.(`Could not ${label.toLowerCase()} selection`);
+    return false;
+  }
+  if (!staged) return false;
+  if (!app.commitPreparedMutation(staged.prepared)) return false;
+  return commitDetachedLayerState(
+    app, staged.layer, staged.state, staged.undo, staged.redo, label,
+  );
+}
+
+export function clearSelection(app) {
+  return runLayerCanvasMutation(app, 'Clear', (g, selectionCanvas) => {
+    if (selectionCanvas) {
+      g.globalCompositeOperation = 'destination-out';
+      g.drawImage(selectionCanvas, 0, 0);
+    } else {
+      g.clearRect(0, 0, app.doc.width, app.doc.height);
+    }
+  });
 }
 
 export function fillSelection(app, color) {
-  app.prepareMutation();
-  const layer = app.doc.active;
-  if (!layer || layer.locked) return;
-  const before = cloneCanvas(layer.canvas);
-  const g = layer.ctx;
-  g.save();
-  if (app.selection.active) {
-    const tmp = makeCanvas(app.doc.width, app.doc.height);
-    const tg = ctx2d(tmp);
-    tg.fillStyle = color;
-    tg.fillRect(0, 0, tmp.width, tmp.height);
-    tg.globalCompositeOperation = 'destination-in';
-    tg.drawImage(app.selection.toCanvas(), 0, 0);
-    g.drawImage(tmp, 0, 0);
-  } else {
-    g.fillStyle = color;
-    g.fillRect(0, 0, app.doc.width, app.doc.height);
-  }
-  g.restore();
-  app.doc.touch();
-  bus.emit('layers');
-  const after = cloneCanvas(layer.canvas);
-  const apply = (c) => {
-    layer.ctx.clearRect(0, 0, app.doc.width, app.doc.height);
-    layer.ctx.drawImage(c, 0, 0);
-    app.doc.touch();
-    bus.emit('layers');
-  };
-  app.history.push({ label: 'Fill', undo: () => apply(before), redo: () => apply(after) });
+  return runLayerCanvasMutation(app, 'Fill', (g, selectionCanvas) => {
+    if (selectionCanvas) {
+      const tmp = makeCanvas(app.doc.width, app.doc.height);
+      const tg = ctx2d(tmp);
+      tg.fillStyle = color;
+      tg.fillRect(0, 0, tmp.width, tmp.height);
+      tg.globalCompositeOperation = 'destination-in';
+      tg.drawImage(selectionCanvas, 0, 0);
+      g.drawImage(tmp, 0, 0);
+    } else {
+      g.fillStyle = color;
+      g.fillRect(0, 0, app.doc.width, app.doc.height);
+    }
+  });
 }

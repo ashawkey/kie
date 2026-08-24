@@ -68,7 +68,30 @@ export async function importImageAsLayer(app, file,
     if (!isCurrent(token)) return 'stale';
     const index = doc.activeIndex + 1;
     const prevActive = doc.activeId;
+    const prevDirty = doc.dirty;
     doc.addLayer(layer, index);
+    if (!isCurrent(token)) {
+      // addLayer publishes synchronously. An observer may replace the document
+      // or advance this document before control returns; remove only our old-
+      // document insertion, without recording replacement state. Preserve any
+      // newer active choice made by that observer.
+      const inserted = doc.layers.indexOf(layer);
+      if (inserted >= 0) doc.layers.splice(inserted, 1);
+      if (doc.activeId === layer.id) doc.activeId = prevActive;
+      // A synchronous observer may already have flattened the temporary stack.
+      // Rebuild that cached composite when it was clean before the import;
+      // otherwise retain its prior dirty state.
+      doc.dirty = true;
+      if (!prevDirty) doc.flatten();
+      if (app.doc === doc) {
+        // Publish the rollback only while this document is still current. This
+        // corrects every structural/pixel observer without creating import
+        // history. Recheck between events in case a doc observer replaces it.
+        bus.emit('doc');
+        if (app.doc === doc) bus.emit('layers');
+      }
+      return 'stale';
+    }
     app.history.push({
       label: 'Import Layer',
       undo: () => { doc.removeLayer(layer.id); doc.activeId = prevActive; bus.emit('doc'); },
@@ -589,7 +612,10 @@ export function copySelection(app) {
   const layer = app.doc.active;
   if (!layer) return null;
   const sel = app.selection;
-  const rect = sel.active && sel.bounds ? sel.bounds : { x: 0, y: 0, w: app.doc.width, h: app.doc.height };
+  // Empty is an active selection with no bounds. It must not fall through to
+  // the null-selection behavior and copy the entire layer.
+  if (sel.active && !sel.bounds) return null;
+  const rect = sel.active ? sel.bounds : { x: 0, y: 0, w: app.doc.width, h: app.doc.height };
   const c = makeCanvas(rect.w, rect.h);
   const g = ctx2d(c);
   g.drawImage(layer.canvas, -rect.x, -rect.y);

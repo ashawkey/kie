@@ -11,6 +11,9 @@ export function applyFilter(app, label, fn, params = {}) {
   app.prepareMutation();
   const layer = app.doc.active;
   if (!layer || layer.locked) { app.toast('Layer is locked'); return; }
+  const sel = app.selection;
+  // An active empty selection affects no pixels and records no no-op history.
+  if (sel.active && !sel.bounds) return false;
   const { width: w, height: h } = layer.canvas;
   const image = layer.ctx.getImageData(0, 0, w, h);
   const before = new ImageData(new Uint8ClampedArray(image.data), w, h);
@@ -19,7 +22,6 @@ export function applyFilter(app, label, fn, params = {}) {
   fn(image, w, h, params, original);
 
   // blend result by selection coverage
-  const sel = app.selection;
   let rect = { x: 0, y: 0, w, h };
   if (sel.active) {
     for (let y = 0; y < h; y++) {
@@ -42,6 +44,7 @@ export function applyFilter(app, label, fn, params = {}) {
   const beforeCrop = cropImageData(before, rect);
   const entry = pixelEntry(app.doc, layer, rect, beforeCrop, label);
   if (entry) app.history.push(entry);
+  return !!entry;
 }
 
 function cropImageData(image, rect) {

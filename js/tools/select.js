@@ -204,6 +204,84 @@ export class LassoTool extends Tool {
   statusHint() { return 'Drag a freehand selection'; }
 }
 
+export function magicWandMask(data, w, h, startX, startY, tolerance = 16,
+  contiguous = true, stats = null) {
+  const n = w * h;
+  const next = new Uint8Array(n);
+  const tol = tolerance ** 2 * 4;
+  const i0 = (startY * w + startX) * 4;
+  const tr = data[i0], tg = data[i0 + 1], tb = data[i0 + 2], ta = data[i0 + 3];
+  const match = (p) => {
+    const i = p * 4;
+    if (data[i + 3] === 0 && ta === 0) return true;
+    const dr = data[i] - tr, dg = data[i + 1] - tg;
+    const db = data[i + 2] - tb, da = data[i + 3] - ta;
+    return dr * dr + dg * dg + db * db + da * da <= tol;
+  };
+
+  if (stats) { stats.enqueues = 0; stats.peak = 0; stats.examined = 0; }
+  if (!contiguous) {
+    for (let p = 0; p < n; p++) {
+      if (stats) stats.examined++;
+      if (match(p)) next[p] = 255;
+    }
+    return next;
+  }
+
+  // Store horizontal runs rather than individual pixels. Pixels are marked
+  // before testing/enqueueing, so no pixel can be examined or enqueued twice;
+  // uniform areas need only a tiny stack instead of millions of duplicate
+  // entries (or a half-document pixel stack).
+  const seen = new Uint8Array(n);
+  const stack = [];
+  const discoverRun = (x, y) => {
+    const seed = y * w + x;
+    if (seen[seed]) return null;
+    seen[seed] = 1;
+    if (stats) stats.examined++;
+    if (!match(seed)) return null;
+
+    let left = x, right = x;
+    while (left > 0) {
+      const p = y * w + left - 1;
+      if (seen[p]) break;
+      seen[p] = 1;
+      if (stats) stats.examined++;
+      if (!match(p)) break;
+      left--;
+    }
+    while (right + 1 < w) {
+      const p = y * w + right + 1;
+      if (seen[p]) break;
+      seen[p] = 1;
+      if (stats) stats.examined++;
+      if (!match(p)) break;
+      right++;
+    }
+    next.fill(255, y * w + left, y * w + right + 1);
+    stack.push(y, left, right);
+    if (stats) {
+      stats.enqueues++;
+      stats.peak = Math.max(stats.peak, stack.length / 3);
+    }
+    return right;
+  };
+
+  discoverRun(startX, startY);
+  while (stack.length) {
+    const right = stack.pop(), left = stack.pop(), runY = stack.pop();
+    for (const y of [runY - 1, runY + 1]) {
+      if (y < 0 || y >= h) continue;
+      let x = left;
+      while (x <= right) {
+        const childRight = discoverRun(x, y);
+        x = childRight === null ? x + 1 : Math.max(x + 1, childRight + 1);
+      }
+    }
+  }
+  return next;
+}
+
 export class MagicWandTool extends Tool {
   static id = 'wand';
   static label = 'Magic Wand';
@@ -225,33 +303,8 @@ export class MagicWandTool extends Tool {
     const g = src.getContext('2d', { willReadFrequently: true });
     const data = g.getImageData(0, 0, doc.width, doc.height).data;
     const w = doc.width, h = doc.height;
-    const tol = (this.opts.tolerance ?? 16) ** 2 * 4;
-    const i0 = (e.iy * w + e.ix) * 4;
-    const t = [data[i0], data[i0 + 1], data[i0 + 2], data[i0 + 3]];
-    const match = (i) => {
-      if (data[i + 3] === 0 && t[3] === 0) return true;
-      const dr = data[i] - t[0], dg = data[i + 1] - t[1], db = data[i + 2] - t[2], da = data[i + 3] - t[3];
-      return dr * dr + dg * dg + db * db + da * da <= tol;
-    };
-    const next = new Uint8Array(w * h);
-    if (this.opts.contiguous === false) {
-      for (let i = 0; i < w * h; i++) if (match(i * 4)) next[i] = 255;
-    } else {
-      const stack = [e.iy * w + e.ix];
-      const seen = new Uint8Array(w * h);
-      while (stack.length) {
-        const p = stack.pop();
-        if (seen[p]) continue;
-        seen[p] = 1;
-        if (!match(p * 4)) continue;
-        next[p] = 255;
-        const x = p % w, y = (p / w) | 0;
-        if (x > 0) stack.push(p - 1);
-        if (x < w - 1) stack.push(p + 1);
-        if (y > 0) stack.push(p - w);
-        if (y < h - 1) stack.push(p + w);
-      }
-    }
+    const next = magicWandMask(data, w, h, e.ix, e.iy,
+      this.opts.tolerance ?? 16, this.opts.contiguous !== false);
     selection.set(combine(selection.mask, next, this.opts.mode || 'replace', w * h));
     pushSelectionEdit(this.app, before, 'Magic Wand');
   }

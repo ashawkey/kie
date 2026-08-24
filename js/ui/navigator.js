@@ -49,13 +49,7 @@ export function installNavigator(app) {
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, box.w, box.h);
     g.imageSmoothingEnabled = box.w < dw; // smooth only when downscaling
-    g.drawImage(app.doc.flatten(), 0, 0, box.w, box.h);
-    if (app.floating) {
-      g.save();
-      g.scale(box.w / dw, box.h / dh);
-      app.floating.drawInto(g);
-      g.restore();
-    }
+    g.drawImage(app.renderer.documentComposite(), 0, 0, box.w, box.h);
     drawRect();
   }
 

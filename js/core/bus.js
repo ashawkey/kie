@@ -17,6 +17,15 @@ export const bus = {
     return () => map.get(type).delete(fn);
   },
   emit(type, ...args) {
-    map.get(type)?.forEach((fn) => fn(...args));
+    // Notifications publish already-committed model state. A broken observer
+    // must not make the operation appear to fail, nor prevent later observers
+    // from rendering that state.
+    map.get(type)?.forEach((fn) => {
+      try {
+        fn(...args);
+      } catch (error) {
+        try { console.error(`Error in ${type} event subscriber`, error); } catch {}
+      }
+    });
   },
 };

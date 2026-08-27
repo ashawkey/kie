@@ -103,7 +103,7 @@ export function installNavigator(app) {
 
   viewEl.addEventListener('wheel', (e) => {
     e.preventDefault();
-    app.view.zoomBy(Math.exp(-e.deltaY * 0.0125));
+    app.view.wheelZoom(e);
   }, { passive: false });
 
   /* ---- keep in sync ---- */

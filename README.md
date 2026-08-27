@@ -1,16 +1,19 @@
 # kie
 
 A pure-static, pixel-art-focused image editor that runs entirely in the browser.
-No build step, no dependencies, no server logic — open `index.html` and draw.
+No runtime dependencies, no server logic — the app is plain ES modules and CSS,
+served (and hot-reloaded) by [Vite](https://vite.dev/).
 
 ## Running
 
-Because it uses ES modules, serve the folder over HTTP:
-
 ```bash
-python3 -m http.server 8000
-# then open http://127.0.0.1:8000/
+npm install
+npm run dev
+# then open http://localhost:5173/
 ```
+
+`npm run build` outputs a static, deployable bundle to `dist/`
+(`npm run preview` serves it locally at http://localhost:4173/).
 
 ## Features
 

@@ -123,8 +123,7 @@ export function installPointer(app, canvas) {
     const anchor = { x: e.clientX - r.left, y: e.clientY - r.top };
     if (e.ctrlKey || e.metaKey || e.altKey) {
       // pinch-zoom on trackpads reports ctrlKey
-      const factor = Math.exp(-e.deltaY * 0.0125);
-      app.view.zoomBy(factor, anchor);
+      app.view.wheelZoom(e, anchor);
     } else if (e.shiftKey) {
       app.view.pan(-e.deltaY, 0);
     } else {

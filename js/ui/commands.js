@@ -146,7 +146,10 @@ export function registerCommands(app) {
       try {
         if (saveProject(app)) toast(t('Project saved'));
       } catch (e) {
-        app.toast(e?.message || 'Project cannot be saved');
+        // projectSaveError carries a translatable detail; anything else falls back.
+        app.toast(e?.detail
+          ? `${t('Project cannot be saved')}: ${t(e.detail).replace('{n}', e.detailArgs)}`
+          : t(e?.message || 'Project cannot be saved'));
       }
     },
   });
@@ -219,7 +222,7 @@ export function registerCommands(app) {
       const doc = token.doc;
       const r = await dialog({
         title: t('Image Size'),
-        subtitle: `Currently ${doc.width} × ${doc.height} px.`,
+        subtitle: t('Currently {size} px.').replace('{size}', `${doc.width} × ${doc.height}`),
         fields: [
           { key: 'width', type: 'number', label: t('Width'), default: doc.width, min: 1, max: 8192 },
           { key: 'height', type: 'number', label: t('Height'), default: doc.height, min: 1, max: 8192 },

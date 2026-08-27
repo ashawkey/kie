@@ -100,7 +100,10 @@ export function buildColorPanel(app) {
   const alphaLabel = el('span', { class: 'gchip', text: '100%' });
 
   const paletteSelect = el('select', { class: 'gselect' },
-    Object.keys(PALETTES).map((k) => el('option', { value: k, text: k })));
+    Object.keys(PALETTES).map((k) => el('option', { value: k, text: t(k) })));
+  const syncPaletteNames = () => {
+    for (const opt of paletteSelect.options) opt.textContent = t(opt.value);
+  };
   const paletteGrid = el('div', { class: 'palette' });
   const recentGrid = el('div', { class: 'palette' });
 
@@ -209,6 +212,7 @@ export function buildColorPanel(app) {
 
   bus.on('color', render);
   bus.on('locale', () => {
+    syncPaletteNames();
     paletteLabel.textContent = t('Palette');
     recentLabel.textContent = t('Recent');
     swPrimary.dataset.tip = t('Primary color');

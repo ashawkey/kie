@@ -1,0 +1,15 @@
+{
+  "name": "kie",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Liquid Glass pixel-art image editor that runs entirely in the browser.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^8.2.2"
+  }
+}

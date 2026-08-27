@@ -3,11 +3,29 @@ import { bus } from './bus.js';
 import { ctx2d, makeCanvas } from './util.js';
 import { drawSessionLayer } from '../tools/transform.js';
 
+// 16x16 tile of the 8px transparency checkerboard, anchored at the screen
+// origin. A pattern fill replaces a per-cell fillRect loop whose cost scaled
+// with the document's on-screen size (millions of offscreen cells at high
+// zoom on tall documents).
+function makeCheckerTile() {
+  const c = document.createElement('canvas');
+  c.width = 16;
+  c.height = 16;
+  const g = c.getContext('2d');
+  g.fillStyle = '#20242d';
+  g.fillRect(0, 0, 16, 16);
+  g.fillStyle = '#2a2f3a';
+  g.fillRect(8, 0, 8, 8);
+  g.fillRect(0, 8, 8, 8);
+  return c;
+}
+
 export class Renderer {
   constructor(app, canvas) {
     this.app = app;
     this.canvas = canvas;
     this.ctx = ctx2d(canvas, { alpha: false });
+    this.checker = this.ctx.createPattern(makeCheckerTile(), 'repeat');
     this.needs = true;
     this.previewDirty = true;
     this.previewCanvas = null;
@@ -118,33 +136,29 @@ export class Renderer {
     const tl = view.toScreen(0, 0);
     const w = doc.width * view.scale;
     const h = doc.height * view.scale;
+    // Visible part of the document in screen space. Everything below is
+    // clipped to this so per-frame cost depends on the viewport, not on the
+    // document size: a 10k-px-tall document at 12x zoom would otherwise loop
+    // over millions of offscreen checkerboard cells and ~11k grid lines.
+    const ix0 = Math.max(0, tl.x), iy0 = Math.max(0, tl.y);
+    const ix1 = Math.min(view.vw, tl.x + w), iy1 = Math.min(view.vh, tl.y + h);
+    const visible = ix1 > ix0 && iy1 > iy0;
 
-    // canvas shadow
-    g.save();
-    g.shadowColor = 'rgba(0,0,0,0.55)';
-    g.shadowBlur = 28;
-    g.shadowOffsetY = 8;
-    g.fillStyle = '#000';
-    g.fillRect(tl.x, tl.y, w, h);
-    g.restore();
+    if (visible) {
+      // canvas shadow (clipping the rect to the viewport is identical: the
+      // blur only shows in a band around the rect's edges, which is unchanged)
+      g.save();
+      g.shadowColor = 'rgba(0,0,0,0.55)';
+      g.shadowBlur = 28;
+      g.shadowOffsetY = 8;
+      g.fillStyle = '#000';
+      g.fillRect(ix0, iy0, ix1 - ix0, iy1 - iy0);
+      g.restore();
 
-    // transparency checkerboard
-    g.save();
-    g.beginPath();
-    g.rect(tl.x, tl.y, w, h);
-    g.clip();
-    const cell = 8;
-    g.fillStyle = '#20242d';
-    g.fillRect(tl.x, tl.y, w, h);
-    g.fillStyle = '#2a2f3a';
-    const cx0 = Math.floor(tl.x / cell), cy0 = Math.floor(tl.y / cell);
-    const cx1 = Math.ceil((tl.x + w) / cell), cy1 = Math.ceil((tl.y + h) / cell);
-    for (let y = cy0; y < cy1; y++) {
-      for (let x = cx0; x < cx1; x++) {
-        if ((x + y) & 1) g.fillRect(x * cell, y * cell, cell, cell);
-      }
+      // transparency checkerboard: one pattern fill for any document size
+      g.fillStyle = this.checker;
+      g.fillRect(ix0, iy0, ix1 - ix0, iy1 - iy0);
     }
-    g.restore();
 
     // image (the live transform composite is already clipped to document size)
     const composite = this.documentComposite();
@@ -153,20 +167,27 @@ export class Renderer {
     g.drawImage(composite, tl.x, tl.y, w, h);
     g.restore();
 
-    // pixel grid
-    if (app.options.grid && view.scale >= 6) {
+    // pixel grid: only lines whose position falls inside the viewport, each
+    // trimmed to the visible band
+    if (app.options.grid && view.scale >= 6 && visible) {
       g.save();
       g.beginPath();
       g.strokeStyle = 'rgba(255,255,255,0.09)';
       g.lineWidth = 1;
+      // A 1px line at screen position u + 0.5 is visible exactly for
+      // u >= -0.5 && u < viewport - 0.5, so use that range for the indices.
       const step = view.scale;
-      for (let x = 0; x <= doc.width; x++) {
+      const gx0 = Math.max(0, Math.ceil((-0.5 - tl.x) / step));
+      const gx1 = Math.min(doc.width, Math.floor((view.vw - 0.5 - tl.x) / step));
+      const gy0 = Math.max(0, Math.ceil((-0.5 - tl.y) / step));
+      const gy1 = Math.min(doc.height, Math.floor((view.vh - 0.5 - tl.y) / step));
+      for (let x = gx0; x <= gx1; x++) {
         const sx = Math.round(tl.x + x * step) + 0.5;
-        g.moveTo(sx, tl.y); g.lineTo(sx, tl.y + h);
+        g.moveTo(sx, iy0); g.lineTo(sx, iy1);
       }
-      for (let y = 0; y <= doc.height; y++) {
+      for (let y = gy0; y <= gy1; y++) {
         const sy = Math.round(tl.y + y * step) + 0.5;
-        g.moveTo(tl.x, sy); g.lineTo(tl.x + w, sy);
+        g.moveTo(ix0, sy); g.lineTo(ix1, sy);
       }
       g.stroke();
       g.restore();

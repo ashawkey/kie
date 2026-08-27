@@ -182,6 +182,7 @@ const zh = {
   /* ---- commands: image ---- */
   'Image Size…': '图像大小…',
   'Image Size': '图像大小',
+  'Currently {size} px.': '当前尺寸为 {size} 像素。',
   'Canvas Size…': '画布大小…',
   'Canvas Size': '画布大小',
   'Grows or crops the canvas without scaling pixels.': '扩展或裁剪画布，不缩放像素。',
@@ -286,6 +287,8 @@ const zh = {
   'Layer opacity': '图层不透明度',
   'Hide layer': '隐藏图层',
   'Show layer': '显示图层',
+  'Imported': '已导入',
+  'Flattened': '已拼合',
 
   /* ---- color panel ---- */
   'Secondary color': '背景色',
@@ -297,11 +300,15 @@ const zh = {
   'Done': '完成',
   'Apply': '应用',
   'Confirm': '确认',
+  'Discard': '放弃',
+  'Discard unsaved changes?': '放弃未保存的更改？',
+  'This will replace the current image and cannot be undone.': '这将替换当前图像，且无法撤销。',
 
   /* ---- export dialog ---- */
   'Export Image': '导出图像',
   'Save As…': '另存为…',
   'Export preview': '导出预览',
+  'Could not export image': '无法导出图像',
   'Source document is {size} px.': '源文档尺寸为 {size} 像素。',
   'Saved': '已保存',
   'Exported': '已导出',
@@ -386,6 +393,42 @@ const zh = {
   'Layer Opacity': '图层不透明度',
   'Rename Layer': '重命名图层',
   'Trim': '裁去边缘',
+  'Selection from Layer': '从图层建立选区',
+  'Rotate 90°': '顺时针旋转 90°',
+  'Rotate 270°': '逆时针旋转 90°',
+
+  /* ---- document & layer op failures ---- */
+  'Could not update document': '无法更新文档',
+  'Could not transform layer': '无法变换图层',
+  'Could not clear selection': '无法清除选区',
+  'Could not fill selection': '无法填充选区',
+  'Invalid or oversized document dimensions': '文档尺寸无效或过大',
+  'Invalid document dimensions': '文档尺寸无效',
+  'Cannot merge backdrop-dependent blend modes': '无法合并依赖背景图层的混合模式',
+
+  /* ---- project save errors ---- */
+  'Project cannot be saved': '无法保存工程',
+  'the document must contain at least one layer': '文档必须至少包含一个图层',
+  'select an active layer and try again': '请选择活动图层后重试',
+  'a layer has invalid properties': '某个图层的属性无效',
+  'a layer has invalid dimensions': '某个图层的尺寸无效',
+  'the encoded project is too large; merge layers or reduce the canvas size':
+    '编码后的工程过大，请合并图层或减小画布尺寸',
+  'a layer could not be encoded; merge layers or reduce the canvas size':
+    '某个图层无法编码，请合并图层或减小画布尺寸',
+  'dimensions must be between 1 and {n}px': '尺寸必须在 1 到 {n} 像素之间',
+  'the {n}-layer limit is exceeded; merge or delete layers': '已超出 {n} 个图层上限，请合并或删除图层',
+  'this canvas size supports at most {n} project layers; merge or delete layers':
+    '当前画布尺寸最多支持 {n} 个工程图层，请合并或删除图层',
+  'this canvas size supports at most 1 project layer; merge or delete layers':
+    '当前画布尺寸最多支持 1 个工程图层，请合并或删除图层',
+  'layer names must be at most {n} characters': '图层名称不能超过 {n} 个字符',
+
+  /* ---- file pickers ---- */
+  'Images': '图像',
+  'PNG image': 'PNG 图像',
+  'JPEG image': 'JPEG 图像',
+  'WebP image': 'WebP 图像',
 };
 /* eslint-enable quote-props */
 

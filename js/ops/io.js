@@ -1,6 +1,7 @@
 // Import / export / project persistence / clipboard.
 import { Doc, Layer } from '../core/doc.js';
 import { bus } from '../core/bus.js';
+import { t } from '../core/i18n.js';
 import {
   downloadBlob, loadImageFromFile, loadImage, makeCanvas, ctx2d, cloneCanvas,
   MAX_EDITOR_DIMENSION, MAX_EDITOR_PIXELS,
@@ -285,7 +286,7 @@ export async function openWithPicker(app, expected = app.beginReplacement()) {
   if (typeof window.showOpenFilePicker !== 'function' || !app.isReplacementTokenCurrent(expected)) return false;
   const [handle] = await window.showOpenFilePicker({
     types: [{
-      description: 'Images',
+      description: t('Images'),
       accept: { 'image/*': ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'] },
     }],
   });
@@ -302,7 +303,7 @@ export async function pickSaveHandle(suggestedName, format) {
   const f = FORMATS[format] || FORMATS.png;
   return window.showSaveFilePicker({
     suggestedName: `${baseName(suggestedName)}.${f.ext}`,
-    types: [{ description: `${f.label} image`, accept: { [f.mime]: [`.${f.ext}`] } }],
+    types: [{ description: t(`${f.label} image`), accept: { [f.mime]: [`.${f.ext}`] } }],
   });
 }
 
@@ -487,8 +488,13 @@ function validateProject(data, textLength) {
   return { width, height, activeIndex, layers: validatedLayers };
 }
 
-const projectSaveError = (detail) =>
-  new Error(`Project cannot be saved: ${detail}`);
+const projectSaveError = (detail, n) => {
+  const e = new Error(`Project cannot be saved: ${String(detail).replace('{n}', n ?? '')}`);
+  // The UI translates detail + number separately at the toast boundary.
+  e.detail = detail;
+  e.detailArgs = n;
+  return e;
+};
 
 /**
  * Reject an editor state before expensive per-layer PNG encoding. Project
@@ -500,18 +506,21 @@ function preflightProjectSave(doc) {
   const width = doc?.width, height = doc?.height, layers = doc?.layers;
   if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) ||
       width < 1 || height < 1 || width > maxDimension || height > maxDimension) {
-    throw projectSaveError(`dimensions must be between 1 and ${maxDimension}px`);
+    throw projectSaveError('dimensions must be between 1 and {n}px', maxDimension);
   }
   if (!Array.isArray(layers) || layers.length < 1) {
     throw projectSaveError('the document must contain at least one layer');
   }
   if (layers.length > maxLayers) {
-    throw projectSaveError(`the ${maxLayers}-layer limit is exceeded; merge or delete layers`);
+    throw projectSaveError('the {n}-layer limit is exceeded; merge or delete layers', maxLayers);
   }
   const pixels = width * height;
   if (pixels * layers.length > maxLayerPixels) {
     const allowed = Math.floor(maxLayerPixels / pixels);
-    throw projectSaveError(`this canvas size supports at most ${allowed} project layer${allowed === 1 ? '' : 's'}; merge or delete layers`);
+    throw projectSaveError(allowed === 1
+      ? 'this canvas size supports at most 1 project layer; merge or delete layers'
+      : 'this canvas size supports at most {n} project layers; merge or delete layers',
+      allowed);
   }
   if (!Number.isSafeInteger(doc.activeIndex) || doc.activeIndex < 0 ||
       doc.activeIndex >= layers.length) {
@@ -519,7 +528,7 @@ function preflightProjectSave(doc) {
   }
   for (const layer of layers) {
     if (!layer || typeof layer.name !== 'string' || layer.name.length > maxLayerNameLength) {
-      throw projectSaveError(`layer names must be at most ${maxLayerNameLength} characters`);
+      throw projectSaveError('layer names must be at most {n} characters', maxLayerNameLength);
     }
     if (typeof layer.visible !== 'boolean' || typeof layer.locked !== 'boolean' ||
         typeof layer.opacity !== 'number' || !Number.isFinite(layer.opacity) ||

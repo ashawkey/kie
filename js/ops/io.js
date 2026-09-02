@@ -617,9 +617,13 @@ export async function loadProject(app, file, expected = app.beginReplacement()) 
 
 /* ---------- clipboard ---------- */
 
-export function copySelection(app) {
-  const layer = app.doc.active;
-  if (!layer) return null;
+/**
+ * Copy the selected pixels to the internal clipboard. `merged` copies the
+ * flattened composite instead of the active layer (Edit > Copy Merged).
+ */
+export function copySelection(app, { merged = false } = {}) {
+  const source = merged ? app.doc.flatten() : app.doc.active?.canvas;
+  if (!source) return null;
   const sel = app.selection;
   // Empty is an active selection with no bounds. It must not fall through to
   // the null-selection behavior and copy the entire layer.
@@ -627,7 +631,7 @@ export function copySelection(app) {
   const rect = sel.active ? sel.bounds : { x: 0, y: 0, w: app.doc.width, h: app.doc.height };
   const c = makeCanvas(rect.w, rect.h);
   const g = ctx2d(c);
-  g.drawImage(layer.canvas, -rect.x, -rect.y);
+  g.drawImage(source, -rect.x, -rect.y);
   if (sel.active) {
     g.globalCompositeOperation = 'destination-in';
     g.drawImage(sel.toCanvas(), -rect.x, -rect.y);

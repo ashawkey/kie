@@ -1,6 +1,7 @@
 // Pixel selection mask (Uint8 coverage per pixel, 0..255) + marching-ants outline.
 import { bus } from './bus.js';
 import { makeCanvas, ctx2d } from './util.js';
+import { featherMask, thresholdMask, translateMask } from './mask.js';
 
 export class Selection {
   constructor(w, h) {
@@ -12,6 +13,7 @@ export class Selection {
     this.height = h;
     this.mask = null; // null == select all
     this.bounds = null;
+    this.lastMask = null;
     this._outline = null;
   }
 
@@ -25,10 +27,35 @@ export class Selection {
   }
 
   clear() {
+    // Reselect restores whatever was dropped here, so remember it before the
+    // mask goes. Undo has its own snapshots and must not disturb this.
+    if (this.mask && this.bounds) this.lastMask = this.mask;
     this.mask = null;
     this.bounds = null;
     this._outline = null;
     bus.emit('selection');
+  }
+
+  /**
+   * True when a deselected mask is still available and still matches the
+   * document size — a crop or resize leaves the remembered mask unusable.
+   */
+  get canReselect() {
+    return !!this.lastMask && this.lastMask.length === this.width * this.height;
+  }
+
+  /** Re-activate the selection that was most recently deselected. */
+  reselect() {
+    if (!this.canReselect) return false;
+    this.set(this.lastMask.slice());
+    return true;
+  }
+
+  /** Shift the mask by whole pixels (arrow keys with a selection tool). */
+  translate(dx, dy) {
+    if (!this.mask || (!dx && !dy)) return false;
+    this.set(translateMask(this.mask, this.width, this.height, dx, dy));
+    return true;
   }
 
   set(mask) {
@@ -69,16 +96,24 @@ export class Selection {
     this.bounds = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
   }
 
-  /** Replace mask from a shape drawn into a temp canvas (rect/ellipse/lasso). */
-  fromShape(drawFn, mode = 'replace') {
+  /**
+   * Replace mask from a shape drawn into a temp canvas (rect/ellipse/lasso).
+   * Canvas path fills are always anti-aliased, so a hard-edged selection has
+   * to be thresholded back to 0/255 afterwards.
+   */
+  fromShape(drawFn, mode = 'replace', { antialias = true, feather = 0 } = {}) {
     const c = makeCanvas(this.width, this.height);
     const g = ctx2d(c, { willReadFrequently: true });
     g.fillStyle = '#fff';
     drawFn(g);
     const src = g.getImageData(0, 0, this.width, this.height).data;
     const n = this.width * this.height;
-    const next = new Uint8Array(n);
+    let next = new Uint8Array(n);
     for (let i = 0; i < n; i++) next[i] = src[i * 4 + 3];
+    if (!antialias) next = thresholdMask(next);
+    // Feather softens the new shape before it is combined, exactly like the
+    // options-bar Feather value in Photoshop.
+    if (feather > 0) next = featherMask(next, this.width, this.height, feather);
     this.set(combine(this.mask, next, mode, n));
   }
 
@@ -137,14 +172,12 @@ export class Selection {
 
 export function combine(prev, next, mode, n) {
   if (mode === 'replace') return next;
-  // null means unrestricted/all pixels, rather than an empty starting set.
-  if (!prev) {
-    if (mode === 'add') return null;
-    if (mode === 'intersect') return next;
-    const out = new Uint8Array(n); // all minus next
-    for (let i = 0; i < n; i++) out[i] = 255 - next[i];
-    return out;
-  }
+  // null is the unrestricted state: editing affects every pixel because
+  // nothing has been selected yet. Boolean ops start from it as an empty set
+  // the way every other editor does — add/intersect yield the new region, and
+  // subtracting from nothing leaves nothing — so Shift/Alt on a fresh canvas
+  // cannot surprise the user with a whole-document or inverted selection.
+  if (!prev) return mode === 'subtract' ? null : next;
   const out = new Uint8Array(n);
   for (let i = 0; i < n; i++) {
     const a = prev[i], b = next[i];

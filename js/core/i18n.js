@@ -78,6 +78,11 @@ const zh = {
   'Linear': '线性',
   'Radial': '径向',
   'Dither': '抖动',
+  'Feather': '羽化',
+  'Sample size': '取样大小',
+  'Point': '取样点',
+  '3 × 3': '3 × 3 平均',
+  '5 × 5': '5 × 5 平均',
   'Snap to pixel': '对齐像素',
   'Pixel grid': '像素网格',
 
@@ -92,16 +97,17 @@ const zh = {
   'Click to flood fill · Right-click: secondary color': '点击填充 · 右键：背景色',
   'Drag from start to end color': '从起点拖到终点生成渐变',
   'Click to sample color · Right-click sets secondary': '点击拾取颜色 · 右键设为背景色',
-  'Drag a rectangular selection · Shift: square · Click to deselect':
-    '拖动创建矩形选区 · Shift：正方形 · 点击取消选择',
-  'Drag an elliptical selection · Shift: circle': '拖动创建椭圆选区 · Shift：正圆',
-  'Drag a freehand selection': '拖动创建自由选区',
-  'Click to select similar pixels': '点击选择相似像素',
+  'Drag a rectangular selection · Shift: add · Alt: subtract · Click to deselect':
+    '拖动创建矩形选区 · Shift：加选 · Alt：减选 · 点击取消选择',
+  'Drag an elliptical selection · Shift: add · Alt: subtract': '拖动创建椭圆选区 · Shift：加选 · Alt：减选',
+  'Drag a freehand selection · Shift: add · Alt: subtract': '拖动创建自由选区 · Shift：加选 · Alt：减选',
+  'Click or drag to select similar pixels · Shift: add · Alt: subtract':
+    '点击或拖动选择相似像素 · Shift：加选 · Alt：减选',
   'Drag a crop box · Enter to apply · Esc to cancel': '拖动裁剪框 · Enter 应用 · Esc 取消',
   'Drag to pan · Space+drag works with any tool': '拖动平移 · 任意工具下按住空格拖动同样可用',
   'Click to zoom in · Alt-click to zoom out': '点击放大 · Alt+点击缩小',
-  'Drag to move layer or selection contents · Arrows nudge':
-    '拖动移动图层或选区内容 · 方向键微调',
+  'Drag to move layer or selection contents · Alt: drag a copy · Arrows nudge':
+    '拖动移动图层或选区内容 · Alt：拖出副本 · 方向键微调',
   'Drag handles to scale · drag outside a corner to rotate · Enter to apply · Esc to cancel':
     '拖动控制点缩放 · 在角点外拖动旋转 · Enter 应用 · Esc 取消',
 
@@ -219,6 +225,20 @@ const zh = {
   'Rotate Layer 90° CCW': '图层逆时针旋转 90°',
 
   /* ---- commands: select ---- */
+  'Copy Merged': '合并拷贝',
+  'Crop to Selection': '裁剪到选区',
+  'Reselect': '重新选择',
+  'Expand Selection': '扩展选区',
+  'Contract Selection': '收缩选区',
+  'Border Selection': '边界选区',
+  'Feather Selection': '羽化选区',
+  'Expand by': '扩展量',
+  'Contract by': '收缩量',
+  'Feather radius': '羽化半径',
+  'Hide Selection Edges': '隐藏选区边缘',
+  'Show Selection Edges': '显示选区边缘',
+  'Toggle Selection Edges': '切换选区边缘',
+  'Move Selection': '移动选区',
   'Select All': '全选',
   'Deselect': '取消选择',
   'Invert Selection': '反选',
@@ -329,6 +349,7 @@ const zh = {
   'Canvas': '画布',
   'Painting': '绘制',
   'Transform & crop': '变换与裁剪',
+  'Selections': '选区',
   'Press a letter to pick a tool. ': '按字母键选择工具。',
   'When several tools share a letter, press it again — or use ':
     '当多个工具共用同一字母时，再次按下该键 — 或使用 ',
@@ -349,6 +370,20 @@ const zh = {
   'Decrease / increase brush size': '减小 / 增大笔刷',
   'Swap primary and secondary color': '交换前景色与背景色',
   'Reset to black and white': '恢复为黑白',
+  'Add to the selection': '添加到选区',
+  'Subtract from the selection': '从选区减去',
+  'Intersect with the selection': '与选区交叉',
+  'Constrain to a square / circle': '约束为正方形 / 正圆',
+  'Alt while dragging': 'Alt 拖动时',
+  'Draw out from the centre': '从中心向外绘制',
+  'Space while dragging': '空格 拖动时',
+  'Reposition the marquee': '移动选框位置',
+  'Drag with the wand': '魔棒拖动',
+  'Keep adding matching regions': '持续加选匹配区域',
+  'Nudge the selection (⇧ for 10px)': '微调选区 1 像素（⇧ 为 10 像素）',
+  'Ctrl + click a thumbnail': 'Ctrl + 点击缩略图',
+  'Load that layer as a selection': '载入该图层为选区',
+  'Move a copy of the pixels': '移动像素的副本',
   'Drag handles': '拖动控制点',
   'Scale the selection': '缩放选区',
   'Drag outside a corner': '在角点外拖动',
@@ -361,6 +396,8 @@ const zh = {
   'Save to the opened file': '保存到已打开的文件',
 
   /* ---- toasts & messages ---- */
+  'Nothing to copy': '没有可拷贝的内容',
+  'Ctrl-click to load as selection': 'Ctrl + 点击载入为选区',
   'Copied': '已复制',
   'Pasted as new layer': '已粘贴为新图层',
   'Pasted image as layer': '已将图像粘贴为图层',

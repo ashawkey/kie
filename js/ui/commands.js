@@ -9,8 +9,9 @@ import { filters, applyFilter } from '../ops/filters.js';
 import {
   resizeImage, resizeCanvasTo, trimTransparentEdges, flipDoc, rotateDoc, transformLayer,
   addLayer, duplicateLayer, deleteLayer, moveLayer, mergeDown, flattenImage,
-  clearSelection, fillSelection,
+  clearSelection, fillSelection, selectionFromLayer,
 } from '../ops/image.js';
+import { expandMask, contractMask, featherMask, borderMask } from '../core/mask.js';
 import {
   importImageAsLayer, exportImage, openWithPicker,
   saveProject, loadProject, copySelection, pasteFromSystem,
@@ -180,10 +181,21 @@ export function registerCommands(app) {
     run: () => { app.cancelFloating(); app.history.redo(); },
   });
 
-  add('edit.copy', { label: 'Copy', key: `${MOD}C`, icon: 'copy', run: () => { copySelection(app); toast(t('Copied')); } });
+  add('edit.copy', {
+    label: 'Copy', key: `${MOD}C`, icon: 'copy',
+    run: () => { toast(t(copySelection(app) ? 'Copied' : 'Nothing to copy')); },
+  });
+  add('edit.copyMerged', {
+    label: 'Copy Merged', key: `${MOD}${SHIFT}C`,
+    run: () => { toast(t(copySelection(app, { merged: true }) ? 'Copied' : 'Nothing to copy')); },
+  });
   add('edit.cut', {
     label: 'Cut', key: `${MOD}X`,
-    run: () => { copySelection(app); clearSelection(app); toast(t('Cut')); },
+    run: () => {
+      if (!copySelection(app)) { toast(t('Nothing to copy')); return; }
+      clearSelection(app);
+      toast(t('Cut'));
+    },
   });
   add('edit.paste', { label: 'Paste', key: `${MOD}V`, run: () => pasteFromSystem(app) });
   add('edit.clear', {
@@ -275,6 +287,18 @@ export function registerCommands(app) {
     },
   });
 
+  add('image.cropToSelection', {
+    label: 'Crop to Selection', transaction: COMMAND_TRANSACTION.MANAGED,
+    enabled: (a) => a.selection.active && !!a.selection.bounds,
+    run: () => {
+      const b = app.selection.bounds;
+      if (!b) return;
+      if (resizeCanvasTo(app, b.w, b.h, -b.x, -b.y, 'Crop')) {
+        app.view.fit(app.doc.width, app.doc.height);
+      }
+    },
+  });
+
   add('image.flipH', { label: 'Flip Horizontal', transaction: COMMAND_TRANSACTION.MANAGED, run: () => flipDoc(app, 'x') });
   add('image.flipV', { label: 'Flip Vertical', transaction: COMMAND_TRANSACTION.MANAGED, run: () => flipDoc(app, 'y') });
   add('image.rotate90', { label: 'Rotate 90° CW', transaction: COMMAND_TRANSACTION.MANAGED, run: () => { if (rotateDoc(app, 90)) app.view.fit(app.doc.width, app.doc.height); } });
@@ -312,16 +336,51 @@ export function registerCommands(app) {
   add('select.all', { label: 'Select All', key: `${MOD}A`, run: () => selectionEdit('Select All', () => app.selection.selectAll()) });
   add('select.none', { label: 'Deselect', key: `${MOD}D`, run: () => selectionEdit('Deselect', () => app.selection.clear()) });
   add('select.invert', { label: 'Invert Selection', key: `${MOD}${SHIFT}I`, run: () => selectionEdit('Invert Selection', () => app.selection.invert()) });
+  add('select.reselect', {
+    label: 'Reselect', key: `${MOD}${SHIFT}D`,
+    enabled: (a) => !a.selection.active && a.selection.canReselect,
+    run: () => selectionEdit('Reselect', () => app.selection.reselect()),
+  });
   add('select.fromLayer', {
     label: 'Selection from Layer Alpha',
-    run: () => {
-      const layer = app.doc.active;
-      if (!layer) return;
-      const d = layer.ctx.getImageData(0, 0, app.doc.width, app.doc.height).data;
-      const mask = new Uint8Array(app.doc.width * app.doc.height);
-      for (let i = 0; i < mask.length; i++) mask[i] = d[i * 4 + 3];
-      selectionEdit('Selection from Layer', () => app.selection.set(mask));
+    enabled: (a) => !!a.doc.active,
+    run: () => selectionFromLayer(app),
+  });
+
+  /* Select > Modify. Each asks for a pixel amount, then rewrites the mask. */
+  const hasSelection = (a) => a.selection.active && !!a.selection.bounds;
+  const modifyCommand = (id, { label, field, def, max, apply }) => add(id, {
+    // The English label doubles as the i18n key and the history label, so only
+    // the display form carries the ellipsis.
+    label: () => `${t(label)}…`, title: label,
+    transaction: COMMAND_TRANSACTION.MANAGED,
+    enabled: hasSelection,
+    run: async () => {
+      const token = app.prepareAsyncMutation();
+      const r = await dialog({
+        title: t(label),
+        fields: [{ key: 'amount', type: 'number', label: t(field), default: def, min: 1, max, suffix: 'px' }],
+        confirm: t('Apply'),
+      });
+      if (!r || !app.isMutationTokenCurrent(token) || !hasSelection(app)) return;
+      const amount = Math.round(r.amount);
+      if (!(amount > 0)) return;
+      const sel = app.selection;
+      selectionEdit(label, () => sel.set(apply(sel.mask, sel.width, sel.height, amount)));
     },
+  });
+
+  modifyCommand('select.expand', {
+    label: 'Expand Selection', field: 'Expand by', def: 1, max: 500, apply: expandMask,
+  });
+  modifyCommand('select.contract', {
+    label: 'Contract Selection', field: 'Contract by', def: 1, max: 500, apply: contractMask,
+  });
+  modifyCommand('select.border', {
+    label: 'Border Selection', field: 'Width', def: 2, max: 500, apply: borderMask,
+  });
+  modifyCommand('select.feather', {
+    label: 'Feather Selection', field: 'Feather radius', def: 2, max: 250, apply: featherMask,
   });
 
   /* ---------------- Filters ---------------- */
@@ -361,6 +420,16 @@ export function registerCommands(app) {
     label: (a) => (a.options.grid ? 'Hide Pixel Grid' : 'Show Pixel Grid'), title: 'Toggle Pixel Grid',
     key: `${MOD}'`, icon: 'grid', transaction: COMMAND_TRANSACTION.VIEW,
     run: () => { app.options.grid = !app.options.grid; bus.emit('tool'); bus.emit('view'); },
+  });
+  add('view.selectionEdges', {
+    label: (a) => (a.options.hideSelection ? 'Show Selection Edges' : 'Hide Selection Edges'),
+    title: 'Toggle Selection Edges',
+    key: `${MOD}H`, transaction: COMMAND_TRANSACTION.VIEW,
+    run: () => {
+      app.options.hideSelection = !app.options.hideSelection;
+      bus.emit('selection');
+      bus.emit('view');
+    },
   });
   add('view.help', { label: 'Help & Keyboard Shortcuts', key: '?', icon: 'help', transaction: COMMAND_TRANSACTION.VIEW, run: () => showHelp(app) });
 

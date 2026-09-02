@@ -32,7 +32,7 @@ class App {
     this.color = new ColorState();
     this.toolOptions = {};
     this.tools = new ToolManager(this);
-    this.options = { grid: true };
+    this.options = { grid: true, hideSelection: false };
     this.floating = null;
     this.clipboard = null;
     this.spaceDown = false;

@@ -3,6 +3,7 @@ import { PixelTool, Tool } from './base.js';
 import { PixelPerfect, Painter } from '../core/pixels.js';
 import { bus } from '../core/bus.js';
 import { hexToRgba, rgbaToHex } from '../core/util.js';
+import { sampleColor } from './select.js';
 
 const SIZE_OPT = { key: 'size', type: 'number', label: 'Size', min: 1, max: 256, step: 1, default: 1, suffix: 'px' };
 const OPACITY_OPT = { key: 'opacity', type: 'range', label: 'Opacity', min: 0, max: 100, step: 1, default: 100, suffix: '%' };
@@ -299,6 +300,10 @@ export class EyedropperTool extends Tool {
   static icon = 'eyedropper';
   static cursor = 'crosshair';
   static options = [
+    {
+      key: 'sampleSize', type: 'select', label: 'Sample size', default: '1',
+      choices: [['1', 'Point'], ['3', '3 × 3'], ['5', '5 × 5']],
+    },
     { key: 'sampleAll', type: 'toggle', label: 'Sample all layers', default: true },
   ];
 
@@ -310,7 +315,15 @@ export class EyedropperTool extends Tool {
     else src = doc.active?.canvas;
     if (!src) return;
     const g = src.getContext('2d', { willReadFrequently: true });
-    const d = g.getImageData(e.ix, e.iy, 1, 1).data;
+    // Sample Size averages a box around the cursor, so a single stray pixel
+    // in a dithered or photographic area does not decide the colour.
+    const size = Number(this.opts.sampleSize) || 1;
+    const r = Math.floor((size - 1) / 2);
+    const x0 = Math.max(0, e.ix - r), y0 = Math.max(0, e.iy - r);
+    const x1 = Math.min(doc.width - 1, e.ix + r), y1 = Math.min(doc.height - 1, e.iy + r);
+    const box = g.getImageData(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+    const d = sampleColor(box.data, box.width, box.height,
+      e.ix - x0, e.iy - y0, size);
     const c = { r: d[0], g: d[1], b: d[2], a: d[3] };
     if (e.button === 2) this.app.color.setSecondary(c);
     else this.app.color.setPrimary(c);

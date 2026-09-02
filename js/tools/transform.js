@@ -286,6 +286,7 @@ export class MoveTool extends Tool {
     this.startAngle = null;
     this.grab = null;
     this.autoCommit = false;
+    this.commitLabel = 'Move';
   }
 
   deactivate() {
@@ -327,10 +328,14 @@ export class MoveTool extends Tool {
       }
       this.mode = 'translate';
     } else {
-      s = beginSession(app, { cut: true });
+      // Alt starts a duplicate: the pixels are copied instead of lifted, so
+      // the original stays behind when the floating copy is committed.
+      const duplicate = e.altKey;
+      s = beginSession(app, { cut: !duplicate });
       if (!s) return;
       s.showHandles = false;
       this.autoCommit = true;
+      this.commitLabel = duplicate ? 'Duplicate' : 'Move';
       this.mode = 'translate';
     }
     this.grab = { x: e.fx, y: e.fy };
@@ -404,10 +409,15 @@ export class MoveTool extends Tool {
 
   onUp() {
     this.mode = null;
-    if (this.autoCommit && this.session && !this.session.showHandles) {
-      commitSession(this.app, 'Move');
+    const s = this.session;
+    if (this.autoCommit && s && !s.showHandles) {
+      // An Alt-click that never moved would otherwise stamp a copy exactly
+      // over its original and push a history entry that changes nothing.
+      if (!s.lifted && s.x === s.sourceX && s.y === s.sourceY) cancelSession(this.app);
+      else commitSession(this.app, this.commitLabel || 'Move');
       this.autoCommit = false;
     }
+    this.commitLabel = 'Move';
   }
 
   onKey(e) {
@@ -462,6 +472,6 @@ export class MoveTool extends Tool {
   statusHint() {
     return this.session?.showHandles
       ? 'Drag handles to scale · drag outside a corner to rotate · Enter to apply · Esc to cancel'
-      : 'Drag to move layer or selection contents · Arrows nudge';
+      : 'Drag to move layer or selection contents · Alt: drag a copy · Arrows nudge';
   }
 }

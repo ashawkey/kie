@@ -90,6 +90,13 @@ A pure-static pixel-art image editor built with plain ES modules and CSS. Open, 
 | `Ctrl`/`Cmd` + `T` | Transform |
 | `Ctrl`/`Cmd` + `A` | Select all |
 | `Ctrl`/`Cmd` + `D` | Deselect |
+| `Ctrl`/`Cmd` + `Shift` + `D` | Reselect |
+| `Ctrl`/`Cmd` + `Shift` + `C` | Copy merged |
+| `Ctrl`/`Cmd` + `H` | Hide/show selection edges |
+| `Shift` / `Alt` + click | Add to / subtract from a selection |
+| `Alt` + drag (move tool) | Drag out a copy of the pixels |
+| `Ctrl`/`Cmd` + click a layer thumbnail | Load that layer as a selection |
+| Arrow keys (selection tools) | Nudge the selection |
 | `Enter` / `Esc` | Apply / cancel |
 | `?` | Help |
 

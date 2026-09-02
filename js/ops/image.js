@@ -2,6 +2,8 @@
 import { bus } from '../core/bus.js';
 import { makeCanvas, ctx2d, cloneCanvas, validateEditorDimensions } from '../core/util.js';
 import { Layer } from '../core/doc.js';
+import { combine } from '../core/selection.js';
+import { maskFromAlpha } from '../core/mask.js';
 
 /** Snapshot every layer canvas + doc size, for coarse-grained undo. */
 function snapshotDoc(doc) {
@@ -620,4 +622,26 @@ export function fillSelection(app, color) {
       g.fillRect(0, 0, app.doc.width, app.doc.height);
     }
   });
+}
+
+/**
+ * Load a layer's alpha as a selection (menu command, or Ctrl-click on the
+ * layer's thumbnail). `mode` combines it with the current selection the same
+ * way the selection tools' Shift/Alt modifiers do.
+ */
+export function selectionFromLayer(app, layer = app.doc.active, mode = 'replace') {
+  if (!layer) return false;
+  app.prepareMutation();
+  const { width: w, height: h } = app.doc;
+  if (layer.canvas.width !== w || layer.canvas.height !== h) return false;
+  const data = layer.ctx.getImageData(0, 0, w, h).data;
+  const before = app.selection.snapshot();
+  app.selection.set(combine(app.selection.mask, maskFromAlpha(data, w * h), mode, w * h));
+  const after = app.selection.snapshot();
+  app.history.push({
+    label: 'Selection from Layer',
+    undo: () => app.selection.restore(before),
+    redo: () => app.selection.restore(after),
+  });
+  return true;
 }

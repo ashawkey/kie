@@ -2,7 +2,8 @@
 import { bus } from '../core/bus.js';
 import { el, makeCanvas, ctx2d } from '../core/util.js';
 import { icon } from './icons.js';
-import { moveLayer, setLayerProp } from '../ops/image.js';
+import { moveLayer, setLayerProp, selectionFromLayer } from '../ops/image.js';
+import { modeFromEvent } from '../tools/select.js';
 import { t } from '../core/i18n.js';
 
 const BLENDS = [
@@ -237,6 +238,23 @@ export function buildLayersPanel(app) {
         },
       }, [icon(layer.visible ? 'eye' : 'eyeOff')]);
 
+      // Ctrl/Cmd-click the thumbnail loads the layer's transparency as a
+      // selection without changing which layer is active; Shift/Alt combine it
+      // with the current selection, exactly as in Photoshop.
+      const thumb = el('img', {
+        class: 'thumb checker',
+        src: thumbFor(layer),
+        alt: '',
+        'data-tip': t('Ctrl-click to load as selection'),
+        'data-tip-side': 'left',
+        onclick: (e) => {
+          if (!e.ctrlKey && !e.metaKey) return;
+          e.stopPropagation();
+          e.preventDefault();
+          selectionFromLayer(app, layer, modeFromEvent(e, 'replace'));
+        },
+      });
+
       const nameEl = el('div', { class: 'lname', text: layer.name });
       const row = el('div', {
         class: 'layer-row' + (active ? ' active' : ''),
@@ -248,7 +266,7 @@ export function buildLayersPanel(app) {
         },
       }, [
         vis,
-        el('img', { class: 'thumb checker', src: thumbFor(layer), alt: '' }),
+        thumb,
         el('div', { class: 'meta' }, [
           nameEl,
           el('div', {

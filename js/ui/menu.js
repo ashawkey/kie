@@ -19,7 +19,7 @@ export const MENUS = [
     desc: 'Undo, clipboard, fills and free transform.',
     items: [
       'edit.undo', 'edit.redo', '-',
-      'edit.cut', 'edit.copy', 'edit.paste', 'edit.clear', '-',
+      'edit.cut', 'edit.copy', 'edit.copyMerged', 'edit.paste', 'edit.clear', '-',
       'edit.fillPrimary', 'edit.fillSecondary', '-',
       'edit.transform',
     ],
@@ -28,7 +28,7 @@ export const MENUS = [
     label: 'Image',
     desc: 'Resize, crop, flip and rotate the whole document.',
     items: [
-      'image.size', 'image.canvasSize', 'image.trim', '-',
+      'image.size', 'image.canvasSize', 'image.cropToSelection', 'image.trim', '-',
       'image.flipH', 'image.flipV', '-',
       'image.rotate90', 'image.rotate270', 'image.rotate180', '-',
       'image.flatten',
@@ -47,7 +47,8 @@ export const MENUS = [
     label: 'Select',
     desc: 'Change which pixels editing affects.',
     items: [
-      'select.all', 'select.none', 'select.invert', '-',
+      'select.all', 'select.none', 'select.reselect', 'select.invert', '-',
+      'select.expand', 'select.contract', 'select.border', 'select.feather', '-',
       'select.fromLayer',
     ],
   },
@@ -67,7 +68,7 @@ export const MENUS = [
     desc: 'Zoom, pixel grid and the help page.',
     items: [
       'view.zoomIn', 'view.zoomOut', 'view.zoom100', 'view.fit', '-',
-      'view.grid', '-', 'view.help',
+      'view.grid', 'view.selectionEdges', '-', 'view.help',
     ],
   },
 ];

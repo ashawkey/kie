@@ -108,7 +108,7 @@ export class Renderer {
 
   _loop(t) {
     const sel = this.app.selection;
-    if (sel.active && sel.bounds) {
+    if (sel.active && sel.bounds && !this.app.options.hideSelection) {
       const o = Math.floor(t / 90) % 8;
       if (o !== this.antsOffset) { this.antsOffset = o; this.needs = true; }
     } else {
@@ -198,8 +198,9 @@ export class Renderer {
     g.lineWidth = 1;
     g.strokeRect(tl.x - 0.5, tl.y - 0.5, w + 1, h + 1);
 
-    // selection marching ants
-    if (app.selection.active && app.selection.bounds) {
+    // selection marching ants (View > Hide Selection Edges keeps the selection
+    // active but stops drawing it, the way Ctrl+H does in Photoshop)
+    if (app.selection.active && app.selection.bounds && !app.options.hideSelection) {
       g.save();
       g.translate(tl.x, tl.y);
       g.scale(view.scale, view.scale);
